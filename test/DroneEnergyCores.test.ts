@@ -104,7 +104,7 @@ describe("DroneEnergyCores", function () {
       ).to.equal(parseEther("4"));
     });
 
-    it("Should allow transferFrom via a standard approve, e.g. for DroneStorefront.turnInCores", async function () {
+    it("Should allow burnFrom via a standard approve, e.g. for DroneStorefront.turnInCores", async function () {
       const { droneEnergyCores, droneStorefront, owner, user1 } =
         await loadFixture(deployShipsFixture);
       await mintTo(droneEnergyCores, owner, user1.account.address, 10n);

@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 // Reward token minted to a player's own wallet for destroying an AI-owned
@@ -14,7 +15,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 // meaningfully deter this kind of trade in a permissionless system (a new
 // wallet is free), so supply is controlled entirely by the mint side
 // (authorizedToMint), not by gating transfers.
-contract DroneEnergyCores is ERC20, Ownable {
+contract DroneEnergyCores is ERC20, ERC20Burnable, Ownable {
     error NotAuthorized(address);
     error MintNotActive();
 

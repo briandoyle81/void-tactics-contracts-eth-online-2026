@@ -1,288 +1,147 @@
-# UTC Market Price Prediction: 10,000 Regular Players
+# UTC Price Analysis: 10,000 Regular Players (Base / ETH)
 
-> **Flagged 2026-09-08 (needs re-examination):** this doc models price in FLOW terms and
-> assumes a Flow-blockchain deploy target. The live deployment is Base Sepolia
-> (ETH-denominated `msg.value` via `ShipPurchaser.purchaseUTCWithFlow`), and no secondary
-> market for UTC exists today, so the "external market price" / arbitrage assumptions below
-> should be re-checked against the current chain and economy before being relied on. See
-> `docs/eth-global-remote-strategy.md` for context.
+> **Re-examined 2026-09-09.** This replaces the FLOW-denominated version of this doc (originally
+> flagged 2026-09-08 in `docs/eth-global-remote-strategy.md` as needing re-checking). The deploy
+> target is Base, native currency is ETH (not the Flow blockchain), and this pass re-derived every
+> number directly from the current contracts (`contracts/Ships.sol`, `contracts/ShipPurchaser.sol`,
+> `contracts/UniversalCredits.sol`) rather than reusing the old FLOW-era assumptions. ETH/USD used
+> below is a live snapshot taken 2026-09-09 (~$2,490/ETH) — **re-check this before using any ETH
+> figure below for an actual deploy; ETH/USD moves.**
 
-## Executive Summary
+## TL;DR
 
-**Predicted Healthy Market Price: 0.95 - 1.0 FLOW per UTC**
-
-This analysis models UTC supply/demand dynamics with 10,000 regular players, accounting for recycling inflation, purchase demand, owner burn strategies, and **direct purchase arbitrage at 1:1 FLOW/UTC**.
-
----
-
-## Economic Model Assumptions
-
-### Player Behavior (10,000 Regular Players)
-
-**Daily Active Users (DAU):**
-- 10,000 total players
-- 30% daily active = **3,000 DAU**
-- 50% weekly active = **5,000 WAU**
-- 20% casual (monthly) = **2,000 MAU**
-
-**Purchase Behavior:**
-- **Active players (3,000 DAU):**
-  - 20% purchase weekly = 600 players/week
-  - Average purchase: Tier 2 (28 ships for 24.99 UTC)
-  - Weekly volume: 600 × 24.99 = **14,994 UTC/week**
-
-- **Regular players (5,000 WAU):**
-  - 10% purchase weekly = 500 players/week
-  - Average purchase: Tier 1 (11 ships for 9.99 UTC)
-  - Weekly volume: 500 × 9.99 = **4,995 UTC/week**
-
-- **Casual players (2,000 MAU):**
-  - 5% purchase monthly = 100 players/month
-  - Average purchase: Tier 0 (5 ships for 4.99 UTC)
-  - Monthly volume: 100 × 4.99 = **499 UTC/month** = 115 UTC/week
-
-**Total Weekly Purchase Demand: ~20,000 UTC/week**
-
-### Ship Lifecycle & Recycling
-
-**Ship Creation:**
-- Weekly purchases: ~600 Tier 2 + 500 Tier 1 + 25 Tier 0 = **~18,000 ships/week**
-- Direct UTC purchases: ~10% of players = 300 players/week × 24.99 UTC = **7,500 UTC/week** (minted, not used for purchases)
-
-**Ship Destruction (Gameplay):**
-- Average ship lifetime: 2-3 games before destruction
-- Weekly destroyed ships: ~15,000 ships (83% of created)
-- Destruction rewards: 15,000 × 0.025 UC = **375 UTC/week** (minted)
-
-**Ship Recycling:**
-- Players recycle unwanted ships: ~3,000 ships/week (17% of created)
-- Recycling rewards: 3,000 × 0.1 UC = **300 UTC/week** (minted)
-
-**Total Weekly UTC Supply Creation:**
-- Direct UTC purchases: 7,500 UTC
-- Destruction rewards: 375 UTC
-- Recycling: 300 UTC
-- **Total: ~8,175 UTC/week minted**
-
-### UTC Demand (Purchases)
-
-**Weekly UTC Spent on Ship Purchases:**
-- Active players: 14,994 UTC
-- Regular players: 4,995 UTC
-- Casual players: 115 UTC
-- **Total: ~20,000 UTC/week**
-
-**Key Point:** UTC is NOT burned during purchases - it accumulates in `ShipPurchaser` contract.
+1. **There is a live pricing bug, not just a units mismatch.** Both `Ships.sol` and
+   `ShipPurchaser.sol` still hardcode their `tierPrices` constructor defaults as
+   `4.99 / 9.99 / 19.99 / 34.99 / 49.99 ether`. That literal was written assuming "1 native token
+   ≈ $1" (true-ish for FLOW). On Base, `ether` means ETH — at ~$2,490/ETH, tier 0 (5 ships) is
+   currently priced at **4.99 ETH ≈ $12,400**, not ~$5. The Base-specific conversion block that
+   would fix this already exists in `ignition/modules/DeployAndConfig.ts` (lines ~1720-1747) but
+   is **commented out** and never wired into either contract's `setPurchaseInfo`/`setTiers` call.
+2. **The old doc's central claim — "`purchaseUTCWithFlow`: 1 FLOW = 1 UTC" — is factually wrong
+   against the current contract**, independent of chain. See §3.
+3. **The old doc's deflation model (owner burns 50-100% of retained UTC) describes a function that
+   does not exist.** `UniversalCredits.sol` is a plain `ERC20 + Ownable` with mint-only logic — no
+   `burn`, no `ERC20Burnable`, nothing callable by the owner or anyone else that reduces supply.
+4. **No secondary market for UTC exists today** (confirmed in `docs/eth-global-remote-strategy.md`).
+   With no market and no burn, most of the old "Price Calculation Models" section (supply/demand
+   equilibrium with velocity, referral arbitrage against a market price) has no real thing to
+   model yet — there is no "UTC market price" today, only a mint-time anchor rate.
 
 ---
 
-## Supply/Demand Analysis
+## 1. What the original version got wrong
 
-### Weekly Flow
+- **Chain/currency:** modeled everything in "FLOW," assumed 1 FLOW ≈ $1 USD. Live target is Base
+  (ETH). ETH is not ≈$1 — using FLOW-era literals as ETH amounts overprices every tier by roughly
+  2,500x at today's ETH price.
+- **"1 FLOW = 1 UTC" (Model 2's foundation):** never true in the contract, on either chain. See §3
+  — the real mint rate is `tierShips[tier] × recycleReward`, not `msg.value`.
+- **Owner burn strategy (50-100% burn scenarios, deflation math):** no burn capability exists in
+  `UniversalCredits.sol`. This section modeled a mechanism that was never built.
+- **"UTC is NOT burned during purchases - it accumulates in `ShipPurchaser` contract"** — this part
+  was directionally correct (still true, see §4), just built on top of the wrong mint-rate
+  assumption above it.
 
-**UTC Supply (Minted):**
-- Direct purchases: +7,500 UTC
-- Destruction rewards: +375 UTC
-- Recycling: +300 UTC
-- **Total Supply Created: +8,175 UTC/week**
+## 2. Target: ~$1 USD per ship, in ETH, on Base
 
-**UTC Demand (Spent):**
-- Ship purchases: 20,000 UTC (transferred to contract, not burned)
-- **Net Supply Impact: +8,175 UTC/week** (if no burning)
+The tier structure (`tierShips = [5, 11, 22, 40, 60]`, identical in both `Ships.sol` and
+`ShipPurchaser.sol`) already encodes a "~$1/ship with bulk discount" curve via its USD literals —
+keep that curve, just convert it to ETH correctly instead of using the literals as raw ETH:
 
-**Contract Accumulation:**
-- UTC received from purchases: 20,000 UTC/week
-- UTC paid to referrers: ~2,000 UTC/week (10% average referral rate)
-- **UTC retained in contract: ~18,000 UTC/week**
+| Tier | Ships | USD price (existing curve) | USD/ship | ETH price @ $2,490/ETH |
+|------|-------|------------------------------|----------|--------------------------|
+| 0    | 5     | $4.99                        | $0.998   | 0.002004 ETH             |
+| 1    | 11    | $9.99                        | $0.908   | 0.004012 ETH             |
+| 2    | 22    | $19.99                       | $0.909   | 0.008024 ETH             |
+| 3    | 40    | $34.99                       | $0.875   | 0.014052 ETH             |
+| 4    | 60    | $49.99                       | $0.833   | 0.020076 ETH             |
 
-### Owner Burn Strategy
+This is the same shape the commented-out block in `DeployAndConfig.ts` was going for
+(`TOKEN_PRICE_USD = 3000` there is stale — replace with the current ETH/USD price, or better, read
+a live price at deploy time rather than hardcoding a constant that goes stale the next time ETH
+moves).
 
-**Healthy Market Scenario (Owner Burns 50% of Retained UTC):**
-- Owner withdraws: 18,000 UTC/week
-- Owner burns: 9,000 UTC/week
-- Owner keeps: 9,000 UTC/week (for operations/marketing)
+**Action needed on both contracts** — `Ships.sol.setPurchaseInfo`/`setTiers` (ship-pack purchases
+paid directly in ETH) **and** `ShipPurchaser.sol.setPurchaseInfo` (UC-token ship purchases +
+`purchaseUTCWithFlow`, which shares the same `tierPrices` array) each need this pushed via their
+own owner-gated setter — they are two independent arrays with the same current bug, not one shared
+fix.
 
-**Net Supply Change:**
-- Minted: +8,175 UTC/week
-- Burned: -9,000 UTC/week
-- **Net: -825 UTC/week (deflation)**
+## 3. `purchaseUTCWithFlow` was never 1:1 (corrected)
 
-**Price Impact:** Deflationary pressure supports price appreciation.
-
----
-
-## Price Calculation Models
-
-### Model 1: Supply/Demand Equilibrium
-
-**Assumptions:**
-- Target circulating supply: 500,000 UTC
-- Weekly net supply change: -825 UTC (with 50% burn)
-- Annual deflation rate: -825 × 52 / 500,000 = **-8.6%**
-
-**Price Formula:**
-```
-Price = (Weekly Purchase Volume × FLOW Value) / (Circulating Supply × Velocity)
+```solidity
+uint mintAmount = tierShips[_tier] * ships.recycleReward(); // recycleReward = 0.1 ether (UTC)
+universalCreditsMintable.mint(_to, mintAmount);
 ```
 
-**With 10k players:**
-- Weekly purchase volume: 20,000 UTC
-- FLOW value per purchase: 20,000 FLOW (assuming 1:1 direct purchases)
-- Circulating supply: 500,000 UTC
-- Velocity (turnover): 2x per month = 0.5 per week
+Mint amounts per tier: `[0.5, 1.1, 2.2, 4.0, 6.0]` UTC — for whatever `tierPrices[_tier]` costs in
+ETH. Using the §2 target prices:
 
-**Price = (20,000 × 1) / (500,000 × 0.5) = 0.08 FLOW per UTC**
+| Tier | ETH paid   | UTC minted | Implied price / UTC (ETH) | Implied price / UTC (USD @ $2,490) |
+|------|------------|------------|-----------------------------|--------------------------------------|
+| 0    | 0.002004   | 0.5        | 0.004008 ETH                 | $9.98                                |
+| 1    | 0.004012   | 1.1        | 0.003647 ETH                 | $9.08                                |
+| 2    | 0.008024   | 2.2        | 0.003647 ETH                 | $9.09                                |
+| 3    | 0.014052   | 4.0        | 0.003513 ETH                 | $8.75                                |
+| 4    | 0.020076   | 6.0        | 0.003346 ETH                 | $8.33                                |
 
-### Model 2: Direct Purchase Arbitrage Ceiling ⚠️ **KEY FACTOR**
+So the real mint-time anchor for UTC is **~$8.3–$10.0 per UTC**, not ~$1. This is roughly an order
+of magnitude off from the old doc's "0.95–1.0 FLOW/UTC" conclusion — that conclusion was built on
+the false 1:1 premise, not on this contract's actual math, and would have been just as wrong on
+Flow (the mint-rate formula doesn't depend on chain at all, only the false 1:1 assumption did).
 
-**Direct Purchase Option:**
-- `purchaseUTCWithFlow`: 1 FLOW = 1 UTC (always available)
-- Creates **arbitrage ceiling** at 1.0 FLOW/UTC
+## 4. What's still true
 
-**Arbitrage Mechanism:**
-- If market price < 1.0 FLOW/UTC: Players buy on market (cheaper)
-  - Creates buying pressure → price rises toward 1.0 FLOW/UTC
-- If market price > 1.0 FLOW/UTC: Players use direct purchase (cheaper)
-  - Creates selling pressure → price falls toward 1.0 FLOW/UTC
+- UTC spent on `purchaseWithUC` ship purchases is transferred, not burned — it accumulates in
+  `ShipPurchaser`, withdrawable by the owner via `withdrawUC()`. Same for ETH paid into
+  `Ships.purchaseWithFlow` / `ShipPurchaser.purchaseUTCWithFlow` (`withdrawFlow()`).
+  `ShipPurchaser`'s referral payouts (0/10/20/35/50% by cumulative ships-sold tier, up to 50% at
+  100k+ ships) draw down that same accumulated balance.
+- The demand-side player behavior framing (DAU/WAU/MAU, weekly purchase counts by tier) is
+  structurally reusable, but the old doc's dollar figures inside it (e.g. "14,994 UTC/week") were
+  denominated in the same broken FLOW≈$1≈UTC unit conflation as everything else — treat those as
+  needing a full re-derivation in ETH/USD terms if this demand model is needed again, not as
+  currently-correct numbers.
 
-**Player Behavior:**
-- Players need specific UTC amounts for tier purchases (4.99, 9.99, 24.99, 49.99, 99.99 UTC)
-- If short on UTC, players will:
-  1. **First:** Check market price
-  2. **If market < 1.0 FLOW/UTC:** Buy on market (saves FLOW)
-  3. **If market ≥ 1.0 FLOW/UTC:** Use direct purchase (guaranteed rate)
-  4. **If market > 1.0 FLOW/UTC:** Strong arbitrage → sell UTC, buy direct
+## 5. Is there anything to predict a "market price" for right now?
 
-**Market Equilibrium:**
-- **Price should stabilize near 1.0 FLOW/UTC** (the direct purchase rate)
-- Slight discount possible (0.95-0.98 FLOW/UTC) due to:
-  - Market liquidity convenience
-  - Bulk discounts
-  - Speculation premium
-- **Price cannot exceed 1.0 FLOW/UTC** (direct purchase arbitrage prevents it)
+No. A market price requires a market. Today:
 
-### Model 3: Referral Arbitrage (Lower Impact)
+- No burn exists → no deflation mechanism to model.
+- No secondary market (DEX pool, CEX listing) exists for UTC → no price that can diverge from the
+  mint-time rate to arbitrage against.
+- The only "price" that exists is the mint-time anchor in §3 (~$8.3–$10/UTC), which is a sale rate,
+  not a market-clearing price.
 
-**50% Referrer Scenario:**
-- Buys 125 ships for 99.99 FLOW
-- Gets 49.995 FLOW referral
-- Recycles: Gets 12.5 UTC
-- **Net cost: 49.995 FLOW for 12.5 UTC = 4.0 FLOW/UTC**
+If a real market gets built later — e.g. the Uniswap v4 pool discussed as a possible third
+ETHGlobal sponsor slot in `docs/eth-global-remote-strategy.md` — the correct number to seed initial
+liquidity around is the **§3 anchor (~$8.3–$10/UTC)**, not $1/UTC. Until then, this doc's job is
+done: there's no market-equilibrium prediction to make, only the mint-price correction above.
 
-**Impact:**
-- Creates selling pressure, but:
-  - Requires 100,000+ ships sold (very few referrers)
-  - Not sustainable long-term
-  - **Market price constrained by 1.0 FLOW/UTC direct purchase ceiling**
+## 6. Action items
 
----
-
-## Predicted Price Range
-
-### Conservative Estimate: **0.90 FLOW per UTC**
-- Market price below direct purchase (arbitrage opportunity)
-- Players prefer market for small discounts
-- Assumes 50% owner burn rate
-
-### Realistic Estimate: **0.95 - 0.98 FLOW per UTC** ⭐
-- **Most likely range** - slight discount to direct purchase
-- Accounts for:
-  - Market liquidity convenience
-  - Bulk purchase discounts
-  - Slight speculation premium
-- Balanced supply/demand with arbitrage ceiling
-
-### Optimistic Estimate: **1.0 FLOW per UTC**
-- Market price equals direct purchase rate
-- No arbitrage opportunity
-- Strong demand, limited supply
-- Owner burn discipline maintains scarcity
-
----
-
-## Price Stability Factors
-
-### Bullish Factors (Price Support)
-1. **Deflationary Supply:** Owner burning creates net deflation
-2. **Growing Player Base:** More demand as players increase
-3. **Game Utility:** UTC needed for ship purchases (real demand)
-4. **Direct Purchase Arbitrage:** 1.0 FLOW/UTC creates **price ceiling** (prevents price from going too high, but also supports price near this level)
-5. **Player Behavior:** Players buy UTC on market when price < 1.0 FLOW/UTC (creates demand)
-
-### Bearish Factors (Price Pressure)
-1. **Recycling Inflation:** Creates new supply (mitigated by burning)
-2. **Direct Purchase Option:** 1:1 FLOW/UTC creates **arbitrage ceiling** (prevents price from exceeding 1.0 FLOW/UTC)
-3. **Referral Arbitrage:** High-tier referrers can create selling pressure
-4. **Low Velocity:** If players hoard UTC, price may drop below 0.95 FLOW/UTC
-5. **Market Liquidity:** If market is illiquid, players may prefer direct purchase
-
----
-
-## Risk Scenarios
-
-### Scenario A: No Owner Burning
-- **Net Supply:** +8,175 UTC/week
-- **Annual Inflation:** +425,100 UTC/year
-- **Price Impact:** Price drops, but **constrained by direct purchase arbitrage**
-- **Market Price:** 0.85 - 0.90 FLOW/UTC (below direct purchase, but not too far due to arbitrage)
-
-### Scenario B: 100% Owner Burning
-- **Net Supply:** -10,825 UTC/week (8,175 minted - 18,000 burned)
-- **Annual Deflation:** -562,900 UTC/year
-- **Price Impact:** Price rises, but **capped at 1.0 FLOW/UTC** by direct purchase
-- **Market Price:** 0.98 - 1.0 FLOW/UTC (approaches direct purchase rate)
-
-### Scenario C: Player Growth (20k players)
-- **Weekly Demand:** 40,000 UTC/week
-- **Weekly Supply:** 16,350 UTC/week
-- **With 50% burn:** Net deflation increases
-- **Market Price:** 0.96 - 1.0 FLOW/UTC (higher demand, price approaches ceiling)
-
----
-
-## Recommendations
-
-### For Price Stability (0.95-0.98 FLOW/UTC target):
-
-1. **Burn 50-60% of Retained UTC:**
-   - Maintains slight deflation
-   - Supports price near direct purchase rate
-   - Keeps operations funded
-
-2. **Monitor Market Price vs Direct Purchase:**
-   - If market price < 0.90 FLOW/UTC: Increase burn rate (too much supply)
-   - If market price > 0.99 FLOW/UTC: Decrease burn rate (approaching ceiling)
-   - Target: 0.95-0.98 FLOW/UTC (slight discount to direct purchase)
-
-3. **Direct Purchase Rate (1:1 FLOW/UTC) is Optimal:**
-   - Creates clear price ceiling
-   - Prevents price from exceeding 1.0 FLOW/UTC
-   - Provides price stability through arbitrage
-   - **Do not change this rate** - it's a key price anchor
-
-4. **Implement Buyback Program (Optional):**
-   - Use FLOW proceeds to buy UTC on market when price < 0.90 FLOW/UTC
-   - Burn purchased UTC
-   - Creates price floor support
-
----
-
-## Conclusion
-
-**Healthy Market Price: 0.95 - 1.0 FLOW per UTC** ⭐
-
-With 10,000 regular players and proper owner burn management (50% of retained UTC), the market should stabilize around **0.95-0.98 FLOW per UTC**, with:
-- **Floor:** 0.85-0.90 FLOW/UTC (recycling economics, no burn scenario)
-- **Ceiling:** 1.0 FLOW/UTC (direct purchase arbitrage - **hard cap**)
-- **Equilibrium:** 0.95-0.98 FLOW/UTC (supply/demand balance with arbitrage)
-
-**Key Success Factors:**
-1. **Direct Purchase Arbitrage:** The 1:1 FLOW/UTC direct purchase creates a price ceiling that prevents price from exceeding 1.0 FLOW/UTC, while also supporting price near this level through arbitrage.
-2. **Owner Burn Management:** Owner must actively burn 50-60% of UTC received from purchases to maintain price stability and create deflationary pressure.
-3. **Player Behavior:** Players will naturally arbitrage between market price and direct purchase rate, keeping price within 0.95-1.0 FLOW/UTC range.
-
-**Why Price is Higher Than Initial Estimate:**
-- Direct purchase at 1:1 FLOW/UTC creates **arbitrage ceiling**
-- If market price < 1.0 FLOW/UTC, players buy on market (creates demand)
-- If market price > 1.0 FLOW/UTC, players use direct purchase (creates selling pressure)
-- This mechanism naturally drives price toward **0.95-1.0 FLOW/UTC range**
+1. ~~Wire the commented-out Base tier-price block in `ignition/modules/DeployAndConfig.ts`
+   (~lines 1720-1747) into real `setPurchaseInfo`/`setTiers` calls against **both** `ships` and
+   `shipPurchaser`, using a current ETH/USD price (or an oracle read — Chainlink Price Feed is
+   already one of the ETHGlobal candidate integrations in `docs/eth-global-remote-strategy.md`, so
+   this could double as that pitch) instead of the stale `TOKEN_PRICE_USD = 3000` literal.~~
+   **Done 2026-09-09:** wired in as a live fetch (CoinGecko ETH/USD, `getEthUsdPrice()` in
+   `DeployAndConfig.ts`), gated to `PRODUCTION` only, with a sane-range guard against a
+   malformed API response. Kept as a plain HTTP fetch rather than an on-chain Chainlink feed —
+   couldn't verify a real Base Sepolia Chainlink ETH/USD proxy address without guessing one, so
+   didn't want to hardcode an unverified oracle address into a deploy script. If the Chainlink
+   ETHGlobal track is still pursued, swapping this fetch for a verified feed read is a clean
+   follow-up.
+2. ~~Until that's wired in, **any real deploy to Base prices tier 0 at ~4.99 ETH instead of ~$5** —
+   confirm this hasn't already happened on a live deploy before treating current on-chain prices as
+   intentional.~~ **Superseded 2026-09-09** by item 1 — no real deploy has happened yet on this
+   checkout (`node_modules` didn't even exist), so this risk never materialized; the fix above
+   covers the next real deploy.
+3. Decide whether to build a real `burn`/`burnFrom` on `UniversalCredits.sol` before making any
+   future deflation claims in a pitch/doc — right now that capability doesn't exist.
+4. ~~Separately, `ignition/modules/DeployAndConfig.ts` currently has `const PRODUCTION = true`
+   committed on `main` — per `CLAUDE.md` this must be `false` before trusting `npx hardhat test`
+   results, and the exact same silent-failure pattern was already hit once (2026-08-26). Confirm
+   this is intentional post-deploy state, not a repeat of that bug, before running the test suite.~~
+   **Done 2026-09-09:** confirmed with the user this was the bug pattern recurring (no intentional
+   real deploy had happened), flipped back to `false`, and the full suite passes (616 passing).

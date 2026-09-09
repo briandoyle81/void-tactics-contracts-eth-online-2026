@@ -162,6 +162,14 @@ contract ShipPurchaser is Ownable, ReentrancyGuard {
         );
     }
 
+    // Burns UC this contract is already holding (from purchaseWithUC sales,
+    // net of referral payouts) directly, as an alternative to withdrawUC —
+    // an on-chain-visible supply reduction instead of a claim about what
+    // happened to withdrawn funds.
+    function burnCollected(uint _amount) public onlyOwner {
+        universalCreditsMintable.burn(_amount);
+    }
+
     function withdrawFlow() public onlyOwner {
         (bool success, ) = payable(owner()).call{value: address(this).balance}(
             ""

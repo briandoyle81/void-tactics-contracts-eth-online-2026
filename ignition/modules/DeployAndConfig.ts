@@ -3,6 +3,7 @@
 
 import { buildModule } from "@nomicfoundation/hardhat-ignition/modules";
 import { parseEther } from "viem";
+import { execSync } from "child_process";
 import starterContent from "../data/singlePlayerStarterContent.json";
 import roguelikeStarterContent from "../data/roguelikeStarterContent.json";
 
@@ -20,7 +21,7 @@ import roguelikeStarterContent from "../data/roguelikeStarterContent.json";
 // is false — this is a plain build-time boolean (not an Ignition
 // parameter) so gated m.call(...) invocations are simply never added to the
 // deployment graph when false, rather than being skipped at execution time.
-const PRODUCTION = true;
+const PRODUCTION = false;
 
 // Address allowed to mint ships from the Firebase Flow backend, with the same
 // rights as ShipPurchaser.
@@ -41,6 +42,78 @@ const TOURNAMENT_WORLD_ID_GROUP = 1n;
 // changes, recompute and update this, or call Tournament.setExternalNullifier(...).
 const TOURNAMENT_EXTERNAL_NULLIFIER =
   318078722027557965998987370672697888390534537434722412480399796468873891570n;
+
+// Ship-pack tiers, shared between Ships.sol and ShipPurchaser.sol's
+// independent tierPrices arrays. TIER_USD_PRICES is the "~$1/ship with bulk
+// discount" curve documented in docs/UTC_Price_Prediction_10k_Players.md —
+// both contracts' constructors hardcode these same numbers as raw
+// `X.XX ether` literals, which only prices ships near $1 each if 1 native
+// token ≈ $1 USD (true-ish for FLOW, false for ETH on Base).
+const TIER_SHIPS = [5, 11, 22, 40, 60];
+const TIER_USD_PRICES = [4.99, 9.99, 19.99, 34.99, 49.99];
+
+// Fixed ETH/USD price used only for tests / non-production deploys, so the
+// test suite stays deterministic and never makes a network call. This is
+// never used to actually price a real deploy — see getEthUsdPrice() below.
+const TEST_ETH_USD_PRICE = 2490;
+
+// Reject a fetched ETH/USD price outside this range rather than silently
+// pricing every ship tier off a malformed/empty API response (near-zero
+// tier prices would let ships be minted for almost nothing).
+const MIN_SANE_ETH_USD_PRICE = 100;
+const MAX_SANE_ETH_USD_PRICE = 50_000;
+
+// Fetches the live ETH/USD price for a real deploy so ship tier prices
+// track the current market instead of a hardcoded constant that goes stale
+// the next time ETH moves (see docs/UTC_Price_Prediction_10k_Players.md,
+// action item 1 — the previous TOKEN_PRICE_USD = 3000 literal in an earlier,
+// now-removed version of this file's tier-pricing block was exactly that
+// kind of stale constant). Ignition's buildModule callback runs
+// synchronously, so this shells out to curl (blocking) rather than using
+// async/await — deploy-time is not latency-sensitive.
+//
+// Only ever called when PRODUCTION is true; tests use TEST_ETH_USD_PRICE
+// and never reach this function, so they never depend on network access.
+function getEthUsdPrice(): number {
+  const raw = execSync(
+    "curl -sf --max-time 10 'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd'",
+    { encoding: "utf-8" },
+  );
+
+  let price: unknown;
+  try {
+    price = JSON.parse(raw)?.ethereum?.usd;
+  } catch {
+    throw new Error(
+      `Failed to parse ETH/USD price response for tier pricing. Raw response: ${raw}`,
+    );
+  }
+
+  if (typeof price !== "number" || !Number.isFinite(price)) {
+    throw new Error(
+      `Failed to fetch a usable ETH/USD price for tier pricing. Raw response: ${raw}`,
+    );
+  }
+  if (price < MIN_SANE_ETH_USD_PRICE || price > MAX_SANE_ETH_USD_PRICE) {
+    throw new Error(
+      `Fetched ETH/USD price $${price} is outside the sane range ` +
+        `[$${MIN_SANE_ETH_USD_PRICE}, $${MAX_SANE_ETH_USD_PRICE}] — refusing ` +
+        `to price ship tiers off of it. Check the API response, or widen ` +
+        `this range if ETH has genuinely moved outside it.`,
+    );
+  }
+
+  console.log(`[DeployAndConfig] Using live ETH/USD price: $${price}`);
+  return price;
+}
+
+// Converts the shared TIER_USD_PRICES curve into wei amounts at the given
+// ETH/USD price.
+function computeTierPricesWei(ethUsdPrice: number): bigint[] {
+  return TIER_USD_PRICES.map((usdPrice) =>
+    parseEther((usdPrice / ethUsdPrice).toFixed(18)),
+  );
+}
 
 const DeployModule = buildModule("DeployModule", (m) => {
   // Deploy helper contracts first
@@ -1717,34 +1790,34 @@ const DeployModule = buildModule("DeployModule", (m) => {
 
   // m.call(ships, "constructAllMyShips");
 
-  // Set the tiers for different chains
+  // Re-price ship tiers in ETH for a real Base deploy, using a live ETH/USD
+  // price fetched at deploy time (see getEthUsdPrice()/computeTierPricesWei()
+  // above and docs/UTC_Price_Prediction_10k_Players.md). Both Ships.sol and
+  // ShipPurchaser.sol default to the same stale "4.99/9.99/... ether"
+  // constructor literal, which only prices ships near $1 each if 1 native
+  // token ≈ $1 USD — false for ETH on Base. Gated to PRODUCTION only:
+  // applying this unconditionally would move tier prices out from under
+  // every existing test that pays an exact parseEther("4.99")-style amount
+  // against the constructor defaults.
+  let setShipsPurchaseInfoCall: any;
+  let setShipPurchaserPurchaseInfoCall: any;
+  if (PRODUCTION) {
+    const tierPricesWei = computeTierPricesWei(getEthUsdPrice());
 
-  // const tierUSDPrices = [4.99, 9.99, 19.99, 34.99, 49.99];
-  // const tierSHIPS = [5, 11, 22, 40, 60];
+    setShipsPurchaseInfoCall = m.call(
+      ships,
+      "setPurchaseInfo",
+      [TIER_SHIPS, tierPricesWei],
+      { id: "SetShipsPurchaseInfo" },
+    );
 
-  // // Base
-
-  // const TOKEN_PRICE_USD = 3000;
-
-  // // Calculate the price in native token (wei) for each tier.
-  // // Each tierUSDPrice is the desired total USD value for the tier.
-  // // Given 1 native token = TOKEN_PRICE_USD, priceInNative = usdPrice / TOKEN_PRICE_USD.
-  // const tierPrices = tierUSDPrices.map((usdPrice) =>
-  //   parseEther((usdPrice / TOKEN_PRICE_USD).toString()),
-  // );
-
-  // // Set the tiers for different chains
-  // m.call(ships, "setTiers", [tierSHIPS, tierPrices]);
-
-  // RONIN SAIGON - Reduce price due to testnet token scarcity
-  // const tierDefaultPrices = [4.99, 9.99, 19.99, 34.99, 49.99];
-  // const tierSHIPS = [5, 11, 22, 40, 60];
-
-  // // Divide prices by 1000 for lower prices for testing to save tokens
-  // const tierPrices = tierDefaultPrices.map((price) => price / 1000);
-
-  // // Set the tiers for different chains
-  // m.call(ships, "setPurchaseInfo", [tierSHIPS, tierPrices]);
+    setShipPurchaserPurchaseInfoCall = m.call(
+      shipPurchaser,
+      "setPurchaseInfo",
+      [TIER_SHIPS, tierPricesWei],
+      { id: "SetShipPurchaserPurchaseInfo" },
+    );
+  }
 
   // World ID router. Toggle between the two lines below (same pattern as
   // `shipNames` above):
@@ -1826,6 +1899,7 @@ const DeployModule = buildModule("DeployModule", (m) => {
         setMaxVariantForTutorialShipsCall,
         allowFreeShipClaimToCreateShipsCall,
         allowShipGrantWinEffectToCreateShipsCall,
+        setShipsPurchaseInfoCall,
       ],
     });
 
@@ -1893,6 +1967,7 @@ const DeployModule = buildModule("DeployModule", (m) => {
 
     m.call(shipPurchaser, "transferOwnership", [MAP_EDITOR], {
       id: "TransferShipPurchaserOwnership",
+      after: [setShipPurchaserPurchaseInfoCall],
     });
 
     m.call(droneYard, "transferOwnership", [MAP_EDITOR], {

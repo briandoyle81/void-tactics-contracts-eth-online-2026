@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "./IShips.sol";
@@ -23,7 +22,7 @@ contract DroneYard is Ownable, ReentrancyGuard {
     event Withdrawn(address indexed to, uint amount);
 
     IShips public immutable ships;
-    IERC20 public immutable universalCredits;
+    IUniversalCredits public immutable universalCredits;
     IShipPurchaser public immutable shipPurchaser;
     IOnchainRandomShipNames public immutable shipNames;
 
@@ -34,7 +33,7 @@ contract DroneYard is Ownable, ReentrancyGuard {
         address _shipNames
     ) Ownable(msg.sender) {
         ships = IShips(_ships);
-        universalCredits = IERC20(_universalCredits);
+        universalCredits = IUniversalCredits(_universalCredits);
         shipPurchaser = IShipPurchaser(_shipPurchaser);
         shipNames = IOnchainRandomShipNames(_shipNames);
     }
@@ -47,6 +46,15 @@ contract DroneYard is Ownable, ReentrancyGuard {
         uint amount = universalCredits.balanceOf(address(this));
         require(universalCredits.transfer(_to, amount), "UTC transfer failed");
         emit Withdrawn(_to, amount);
+    }
+
+    /**
+     * @dev Burns UTC modification fees this contract is already holding,
+     * as an alternative to withdraw() — an on-chain-visible supply
+     * reduction instead of a claim about what happened to withdrawn funds.
+     */
+    function burnCollected(uint _amount) external onlyOwner {
+        universalCredits.burn(_amount);
     }
 
     /**

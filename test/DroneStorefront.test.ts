@@ -56,9 +56,11 @@ describe("DroneStorefront", function () {
     expect(
       await droneEnergyCores.read.balanceOf([user1.account.address]),
     ).to.equal(0n);
+    // turnInCores burns the turned-in DEC directly rather than holding it.
     expect(
       await droneEnergyCores.read.balanceOf([droneStorefront.address]),
-    ).to.equal(10n);
+    ).to.equal(0n);
+    expect(await droneEnergyCores.read.totalSupply()).to.equal(0n);
   });
 
   it("Should advance through multiple tiers in sequence", async function () {

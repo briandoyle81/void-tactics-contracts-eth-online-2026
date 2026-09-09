@@ -52,14 +52,13 @@ contract DroneStorefront is Ownable {
             revert WrongAmount(required, _amount);
         }
 
-        require(
-            IDroneEnergyCores(droneEnergyCores).transferFrom(
-                msg.sender,
-                address(this),
-                _amount
-            ),
-            "DEC transfer failed"
-        );
+        // Burn turned-in cores directly out of circulation (requires the
+        // caller to have approved this contract for `_amount`) rather than
+        // pulling them into this contract's own balance — DEC turned in
+        // here was previously an unrecoverable sink (no withdraw path
+        // existed), so burning is strictly more honest about what already
+        // happens to it, and it's now reflected in totalSupply().
+        IDroneEnergyCores(droneEnergyCores).burnFrom(msg.sender, _amount);
 
         droneCoreTier[msg.sender] = currentTier + 1;
 
