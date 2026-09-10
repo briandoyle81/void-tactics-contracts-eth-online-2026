@@ -51,9 +51,16 @@ first pass at all:
   `docs/UTC_Price_Prediction_10k_Players.md` explicitly models a "0.95 - 1.0 FLOW per UTC"
   target price, i.e. it assumes Flow blockchain was the actual deploy target — but the live
   deployment is Base Sepolia (ETH-denominated). That doc needs to be re-examined against the
-  current deploy target before anything here leans on its numbers.** Unconfirmed whether a
+  current deploy target before anything here leans on its numbers.** ~~Unconfirmed whether a
   real secondary market was ever an actual goal here vs. a modeling assumption in that doc —
-  if it's the latter, this pitch loses its grounding and should be dropped.
+  if it's the latter, this pitch loses its grounding and should be dropped.~~ **Resolved
+  2026-09-10, confirmed by the project owner directly (not inferred): a real UTC secondary
+  market is "a real and necessary goal, not just for the hackathon."** This pitch keeps its
+  grounding — see the ceiling-over-floor design decision and tightened proposal under pick C
+  below, developed once this was confirmed. The FLOW-vs-Base-Sepolia denomination mismatch in
+  `docs/UTC_Price_Prediction_10k_Players.md`'s specific numbers is a separate, still-open loose
+  end — the *goal* is confirmed real, but that doc's actual price targets still need
+  re-examining against the live ETH-denominated deployment before anything leans on them.
 - **Confirmed real, low-risk:** the deploy/ops tooling (`scripts/allowFirebaseMinter.ts`, the
   `METAMASK_WALLET_1` hot key pattern in `.env`) is exactly the kind of leaked-secret risk
   Ledger's Key Ring track targets, and fixing it touches ops scripts, not contract bytecode — no
@@ -342,6 +349,67 @@ built even if only one is ultimately submitted as the "official" third sponsor.
   integration go through CRE. Plain VRF (subscription model) is directly eligible on its own —
   scope against that, not a CRE wrapper, unless CRE genuinely simplifies the integration.
 
+**Pitch (2026-09-10):** Chainlink VRF is the smallest prize of the three we're weighing ($500 for
+"Best Chainlink-Powered Upgrade," versus $1,500 for Ledger and $2,000 for Uniswap), but it's also
+the cheapest and safest to actually ship: `IRandomManager` is a 3-function interface
+(`requestRandomness`, `revealRandomness`, `fulfillRandomRequest`), so the work is writing one new
+`ChainlinkRandomManager` contract that satisfies it and calling the existing owner-gated
+`Ships.setConfig` plus `Tournament`'s constructor/config to point at it — no proxy, no changes to
+any consumer, since `Ships.sol` was deliberately written to know nothing about how reveal works.
+It's plain VRF (subscription model), not CRE. And it isn't hackathon busywork: `docs/pre-audit.md`
+already documents the residual risk in our current `block.prevrandao` commit-reveal scheme — a
+patient caller can preview an epoch's entropy for free and simply decline to submit until it's
+favorable — and names real VRF as the actual fix, not a hypothetical one. Low effort, low risk,
+real remediation, small prize.
+
+**Verified architecture fit (2026-09-10).** The claim "no changes to any consuming contract's
+logic" was previously an assumption — checked it against the actual call sites and it holds.
+`Ships.constructShip` (`Ships.sol:330-352`) and `Tournament.buildBracket`
+(`Tournament.sol:340-354`) already split `requestRandomness()` and `fulfillRandomRequest()` into
+two separate transactions, and both are already written to tolerate a revert
+(`RandomManager.TooSoonToReveal`) when called before the result is ready —
+`Tournament.buildBracket` is explicitly documented as permissionless/retryable for exactly this
+reason ("no single party staying offline can block every registrant"). That's precisely the
+request-now/fulfill-or-revert-later shape Chainlink VRF's subscription model needs:
+`ChainlinkRandomManager.requestRandomness()` calls the VRF Coordinator and stores the returned
+request id; the Coordinator's `fulfillRandomWords` callback (a separate, later transaction) stores
+the delivered word; `fulfillRandomRequest`/`revealRandomness` return the stored result if the
+callback has already landed, or revert (reusing the same `TooSoonToReveal`-style semantics callers
+already expect) if it hasn't. No behavioral change to `Ships.sol`/`Tournament.sol`/`Game.sol` is
+needed — the existing revert-and-retry UX already covers the VRF wait.
+
+**Re-evaluated against the track's own requirements (2026-09-10).** Qualification text
+(`docs/eth-global-remote.md`, Chainlink section) requires: (1) integrate at least one Chainlink
+service directly within smart contract logic/onchain workflows, not just display data — satisfied,
+`ChainlinkRandomManager` directly replaces the entropy source `Ships.constructShip`/
+`Tournament.buildBracket` consume; (2) the integration must contribute to a real state change on
+a blockchain — satisfied, ship trait generation and bracket construction are genuine on-chain
+writes driven by the revealed value; (3) clearly demonstrate how the upgrade improves the existing
+project — satisfied by citing `docs/pre-audit.md`'s own documented residual-risk finding as the
+concrete "why this is better" narrative. Plain VRF (not CRE) remains directly eligible per the
+correction above.
+
+**Tightened proposal (2026-09-10):**
+
+1. Confirm the current recommended Chainlink VRF subscription-model integration path (base
+   contract, coordinator address for Base Sepolia) against Chainlink's own docs before writing —
+   don't assume a specific version/base-contract name, their SDK surface moves.
+2. Write `ChainlinkRandomManager.sol` implementing `IRandomManager` exactly as specified above —
+   request stores the VRF request id, the Coordinator's callback stores the delivered word,
+   `fulfillRandomRequest`/`revealRandomness` return-or-revert per the verified architecture fit.
+3. Repoint `Ships.setConfig` and `Tournament`'s constructor/config (both owner-gated) to the new
+   manager — no changes to `Ships.sol`, `Tournament.sol`, or `Game.sol` themselves, per the
+   verified fit above.
+4. A real, LINK-funded VRF subscription, deployed and demoed on Base Sepolia only, per this repo's
+   deploy-safety rule — this is a live testnet deploy, not just `hardhat test`, and needs explicit
+   deploy authorization at build time.
+5. Demo: a real request → VRF-callback → reveal cycle on Base Sepolia (e.g. minting + constructing
+   a ship, or closing + building a tournament bracket), showing the on-chain state change, plus the
+   `docs/pre-audit.md` finding as the required improvement narrative.
+
+No contract-size pressure — this is a new standalone contract; `Ships.sol`/`Tournament.sol` stay
+untouched.
+
 **B. Ledger — "Continuity" track — $1,500 (1st $1,000 / 2nd $500)**
 
 - Almost entirely an ops/tooling change: move the hot key used by
@@ -351,9 +419,78 @@ built even if only one is ultimately submitted as the "official" third sponsor.
 - Matches the track's own example almost exactly: "Make wallet-cli ring the key backend for the
   .env... files your repo already has" / "Put a device confirmation in front of an action your
   product already performs."
-- Needs scoping: which specific admin action(s) get the device-confirmation treatment, and
-  whether the Key Ring CLI needs a CI/VPS enrollment step (no USB port) given deploys likely run
-  from a laptop or CI runner rather than a device with the Ledger physically attached.
+- ~~Needs scoping: which specific admin action(s) get the device-confirmation treatment~~ —
+  resolved 2026-09-10, see tightened proposal below (inventory confirmed against the actual repo,
+  not speculative). Whether the Key Ring CLI supports headless CI/VPS enrollment is still open.
+
+**Confirmed inventory (2026-09-10).** Checked `hardhat.config.ts` and every script in `scripts/`
+rather than guessing. `METAMASK_WALLET_1` (a plaintext key from `.env`) is the sole signer for
+five networks — `base-sepolia`, `flow-testnet`, `ronin-saigon`, `polygon-amoy`, `xai-testnet` — and
+it signs exactly two kinds of real transaction today: (1) every Ignition deploy run against those
+networks, and (2) `scripts/allowFirebaseMinter.ts`'s `setIsAllowedToCreateShips` call, the only
+post-deploy owner-gated *write* script in the repo. `scripts/healthcheck.ts` also uses
+`getWalletClients`, but only for `simulateContract` (a read-only dry run, no `writeContract`) — it
+never broadcasts, so it's out of scope; there is no separate "RandomManager repoint" or
+"mint-authorization" script today, those were speculative future actions, not present ones.
+
+**Re-evaluated against the track's own requirements (2026-09-10).** The Continuity sub-prize's
+qualification text (`docs/eth-global-remote.md`, Ledger section) asks for: a meaningful
+contribution to, or extension of, an existing shipped app using the Ledger Agent Stack; a public
+repo or PR with a README/description explaining the problem and how to run it; and a demo video
+(five minutes or less) showing the improvement working. The confirmed inventory above satisfies
+this directly — an existing, real, currently-unprotected hot key on a shipped product is exactly
+the "action that previously had none" the track's own example language describes. This doesn't
+change the eligibility flag already recorded above (whether the parent track's "AI agents and
+AI-powered products" framing binds the Continuity sub-prize) — that remains genuinely unconfirmed
+and still needs checking with the track's organizers before committing build time.
+
+**Tightened proposal (2026-09-10):**
+
+1. Move `METAMASK_WALLET_1`'s role to Ledger's Key Ring CLI (`wallet-cli ring`) as the signer
+   backend for `hardhat.config.ts`'s network `accounts`, covering both real uses at once (deploys
+   and `allowFirebaseMinter.ts`) rather than gating one script in isolation.
+2. Open scoping question, still unresolved: does Key Ring CLI support enrollment from a headless
+   CI/VPS deploy path, or does it require a physical Ledger device attached to whatever machine
+   runs the deploy/script — this determines whether the change is a straightforward local-dev
+   signer swap or a bigger workflow change if deploys ever move to CI.
+3. Demo: a real Base Sepolia transaction (e.g. an `allowFirebaseMinter.ts` grant/revoke run, or a
+   redeploy) signed via the Key Ring CLI instead of the plaintext `.env` key, recorded as the
+   required five-minute-or-less video.
+4. Eligibility flag above still stands and gates whether to proceed at all — check with Ledger's
+   track organizers before committing real engineering time.
+
+**Pitch (2026-09-10):** Ledger's Continuity track fits this repo almost exactly as written: right
+now every owner-gated admin action — `scripts/allowFirebaseMinter.ts` calling
+`setIsAllowedToCreateShips`, plus any future RandomManager repoint or mint-authorization change —
+signs with a plaintext `METAMASK_WALLET_1` private key pulled straight out of `.env` in
+`hardhat.config.ts`, with no hardware confirmation between "run the script" and "owner-privileged
+state changes on-chain." Swapping that for `wallet-cli ring` as the key backend, or at minimum
+putting a device-confirmation prompt in front of the minter-allowlist call, is close to pure ops
+work — no new Solidity, no size budget spent, just moving where the signature comes from. The
+real payoff outlasts the $1,500 prize: it closes the actual worst-case in this repo, a leaked or
+malicious-laptop `.env` silently granting ship-minting rights to an attacker's address. The
+honest gap is scoping: which admin action(s) get gated first, and whether Key Ring CLI supports
+enrollment from a headless CI/VPS deploy path rather than a developer's laptop with a Ledger
+plugged in — that needs to be checked before committing to it as the pick.
+
+**Clarification (2026-09-10):** the pitch above was unclear and read as if it proposed gating the
+Firebase backend's actual ship-minting calls, which must stay fully automated. It doesn't.
+`scripts/allowFirebaseMinter.ts` is the Ships contract *owner* calling
+`setIsAllowedToCreateShips(minter, allowed)` — a rare, manual admin action that grants/revokes the
+Firebase backend's address permission to mint. Once granted, the Firebase backend mints using its
+own separate key (`DEFAULT_MINTER` in the script), untouched by this. A hardware-confirmation gate
+would sit on the owner's infrequent grant/revoke action only, never on the automated per-ship
+mints themselves.
+
+**Flagged — eligibility genuinely unconfirmed (2026-09-10):** Ledger's sponsor blurb for the whole
+$5,000 pool frames it as "Build AI agents and AI-powered products that use Ledger as the trust
+layer" (`docs/eth-global-remote.md` line ~789-797). The Continuity sub-prize's own example
+directions (hardware signer for a shipped app, Key Ring as `.env` key backend, device confirmation
+on an existing action) don't literally require an AI agent, but it's unconfirmed whether judges
+will hold the Continuity sub-prize to the parent track's AI framing regardless — same shape of
+risk already caught once on the Graph pick. Not asserting an answer either way; this needs
+checking against the track's own Discord/organizers (`https://developers.ledger.com/ethonline`)
+before committing real engineering time to it.
 
 **C. Uniswap — "Best Uniswap Stack Contribution" (Continuity) — $2,000 (1st $1,000 / 2nd $1,000)**
 
@@ -362,11 +499,153 @@ built even if only one is ultimately submitted as the "official" third sponsor.
   assumes exists (a small fee-on-swap routed into the existing UTC burn/treasury flow, closing
   the loop between the 1:1 `purchaseUTCWithFlow` mint rate and the assumed external market
   price).
-- Needs scoping: exact hook logic (fee capture + where it's routed — does it feed the existing
-  `owner()` treasury withdrawal path in `ShipPurchaser.sol`, or a new burn sink?), and whether a
-  v4 pool needs its own liquidity seeding plan for a believable demo.
+- ~~Needs scoping: exact hook logic (fee capture + where it's routed — does it feed the existing
+  `owner()` treasury withdrawal path in `ShipPurchaser.sol`, or a new burn sink?)~~ — resolved
+  2026-09-10, see design decision below: routes to a dedicated giveaway/fundraising treasury, not
+  burn, not the existing `owner()` path. Whether a v4 pool needs its own liquidity seeding plan
+  for a believable demo is still open.
 - Requires a `FEEDBACK.md` + Uniswap Developer Feedback Form submission per the track's
   qualification requirements.
+
+**Design decision — ceiling over floor, by design (2026-09-10).** Two actual goals drove this,
+stated by the project owner, not inferred: (1) a pool of UTC for giveaways, events, prizes, or
+sale-for-fundraising, created from real economic activity rather than minted by fiat; (2) keep
+UTC's price stable relative to the native token — but explicitly prioritizing the **ceiling**
+over the floor, because the intent is for UTC to be a **utility asset, not a speculative one**.
+
+- **Ceiling is already free, confirmed via the contract.** `ShipPurchaser.sol`'s `tierPrices` is a
+  plain owner-set array (`setPurchaseInfo`, line 138) — no bonding curve, no cap on mint volume,
+  no cost-per-unit increase with scale. So the arbitrage ceiling is unconditional: whenever pool
+  price rises above the current tier price, anyone can mint UTC at that fixed price and sell into
+  the pool for profit, pushing price back down. Zero new code needed for this half.
+- **Floor is deliberately not defended.** A defended floor (symmetric redeem function, or a
+  treasury-funded buyback) was considered and rejected: it creates a predictable arbitrage spread
+  that attracts the exact mercenary/speculative capital the "utility asset" goal is trying to
+  avoid, and — per this repo's standing rule to assume hostile actors will exploit any exploitable
+  mechanism for free — it opens a real treasury-drain surface (sustained dumping to trigger
+  buybacks, sandwiching the buyback trades) that would need serious adversarial hardening neither
+  scoped nor wanted here.
+- **A soft, passive floor exists anyway, for free.** Once pool price drops meaningfully below the
+  mint tier price, buying off the pool becomes cheaper than minting, so organic gameplay demand
+  naturally supports price without the protocol promising or capitalizing anything.
+- **Monitor, don't defend.** Sustained below-mint drift is a signal to watch on the Graph
+  economy-transparency panel (already planned in pick #1), not a condition to actively correct.
+
+~~**Re-evaluated against the track's own requirements (2026-09-10).** The track's description asks
+for "new v4 hooks, extensions or improvements... tooling or solutions built for the broader
+ecosystem" (`docs/eth-global-remote.md` Uniswap section) — a single, focused fee-to-treasury hook
+satisfies this directly, and arguably makes a *cleaner* submission than a hook also trying to
+defend a peg (easier for a judge to read and verify per the qualification requirement that the
+README "clearly point[] to the relevant contracts and lines of code"). Nothing in the track's
+qualification requirements (public repo, `FEEDBACK.md`, Developer Feedback Form, README pointing
+at the code) asks for price-stability guarantees, liquidity depth, or TVL — dropping floor-defense
+costs no eligibility, it only removes scope that was never required.~~
+
+~~**Tightened proposal (2026-09-10):**
+
+1. Deploy a UTC/ETH (or UTC/USDC) Uniswap v4 pool.
+2. One hook, one job: capture a fee on swap, route it to a **new, dedicated treasury contract**
+   scoped to giveaways/events/prizes/fundraising — not the existing `owner()` withdrawal path in
+   `ShipPurchaser.sol` (that path is general-purpose owner funds; this pool's fees have a distinct,
+   stated purpose and should stay separately trackable/spendable). Confirm this contract shape
+   before building.
+3. No symmetric redeem function. No buyback bot or keeper. No price-band logic. Explicitly out of
+   scope by the design decision above, not deferred for later.
+4. Liquidity seeding plan for a believable demo — still open, needs scoping (how much UTC/ETH,
+   sourced from where).
+5. `FEEDBACK.md` + Uniswap Developer Feedback Form submission, per the track's qualification
+   requirements.
+
+This is a materially smaller build than the original three-bullet version above (no peg-defense
+logic, no redeem function) — worth revisiting the "biggest lift of the three" comparison against
+Chainlink VRF and Ledger once liquidity seeding is scoped.~~
+
+**Superseded 2026-09-10 — the fee-to-treasury hook above is dropped entirely, not just
+re-routed.** Checked `ShipPurchaser.sol:157-178` directly: it already has `withdrawUC()` (pulls
+the UC balance the contract has accumulated from real `purchaseWithUC` sales, net of referrals) and
+`withdrawFlow()` (same, for ETH from `purchaseUTCWithFlow` sales). Both owner-gated, both already
+shipped, both already economy-sourced. Goal 1 (a UTC/fundraising reserve built from real activity,
+not fiat minting) is already fully met by existing code — a swap-fee hook would have duplicated it.
+It also would have worked directly against goal 2: an added fee on top of the pool's own LP fee
+makes every trade costlier, discouraging exactly the arbitrage trading the ceiling depends on. And
+it reads as exactly the kind of protocol-level toll on ordinary trading this project doesn't want
+UTC to represent.
+
+**Also considered and rejected — an active ceiling-enforcement hook (2026-09-10).** Explored
+whether a hook could *automate* the ceiling instead of relying on passive external arbitrage: on a
+swap that would push pool price above the cheapest implied `ShipPurchaser` tier rate, either (A)
+revert the trade, or (B) have the hook itself mint fresh UTC (via `UniversalCredits.sol`'s existing
+`authorizedToMint` allowlist, the same pattern already used for `ShipPurchaser`) and sell it into
+the pool to correct price in the same transaction. Rejected, for real reasons, not just because it
+was extra scope:
+
+- It doesn't add capability beyond the existing passive arbitrage — it only removes the natural
+  friction (gas cost, needing a human to notice) that currently gives the ceiling some slack.
+- The reference price isn't a single number — `ShipPurchaser` has five independently owner-set
+  tiers, so the true ceiling is whichever tier currently implies the cheapest UTC-per-ETH rate,
+  computed live; getting this wrong enforces the wrong ceiling.
+- (B) specifically is a real security concern, not a hypothetical one: minting and selling supply
+  *inside* a swap, atomically, is a known hard-to-secure pattern (elastic-supply-on-price-pressure
+  designs have a real history of exploits) — imprecise correction math creates a round-trip
+  extraction target for a sufficiently careful attacker, exactly the kind of permissionless,
+  cost-free-to-probe surface this repo's threat model says to assume will be attacked, not one to
+  wave through as "no one would bother."
+- Confirmed directly by the project owner: a tight peg isn't even wanted — occasional upward
+  price excursions are fine, and considered unlikely to matter in practice anyway. Given that,
+  there is no goal left for an active hook (either variant) to serve.
+
+**Final design (resolved 2026-09-10): no hook at all.**
+
+1. Deploy a UTC/ETH Uniswap v4 pool — no custom hook, vanilla pool.
+2. Seed initial liquidity from the UC/ETH already sitting in `ShipPurchaser`, withdrawable today
+   via `withdrawUC()`/`withdrawFlow()` — an allocation decision (how much of the existing,
+   already-economy-sourced treasury becomes an LP position vs. stays spendable for
+   giveaways/events/prizes/fundraising), not a new revenue mechanism.
+3. Ceiling relies entirely on the existing passive `purchaseUTCWithFlow` arbitrage — zero new
+   code. Deliberately not pinned tight; occasional excursions above the mint rate are accepted by
+   design, not a defect to correct.
+4. Goal 1 (economy-sourced reserve for giveaways/fundraising) needs no new mechanism — already
+   served by `withdrawUC()`/`withdrawFlow()`.
+5. `FEEDBACK.md` + Uniswap Developer Feedback Form submission, per the track's qualification
+   requirements — unchanged.
+
+**Honest note on competitiveness.** The track's description is satisfied by this scope — "Build on
+or integrate any part of the Uniswap stack, including the Uniswap AMM (v2, v3, or v4)"
+(`docs/eth-global-remote.md`) doesn't require a custom hook, and the liquidity-seeding tooling
+(drawing from the existing treasury) is real, open-source code for a judge to read. But this is now
+the smallest, least differentiated version of this pick across every draft in this doc — no custom
+hook at all. That's a deliberate trade favoring safety and product fit over how impressive the
+submission looks to judges, consistent with this project's stance against building complexity that
+isn't earning its keep. Worth being aware of, not worth reversing.
+
+**Addendum 2026-09-10 — the last candidate hook (event emission for the Graph dashboard) is also
+redundant, confirmed.** V4's `PoolManager` is a singleton: it emits its own `Swap` event (and the
+liquidity-action equivalents) for every pool on every swap, natively, whether or not a hook is
+attached at all — this is core protocol behavior, not something a hook adds. So the Graph
+subgraph from pick #1 needs no custom hook either; it indexes `PoolManager`'s native `Swap` events
+filtered to this pool's id, and price/volume for the dashboard's economy panel comes from that for
+free. Likely already covered by an existing standardized Uniswap v4 subgraph schema too, matching
+the same "build on a standardized schema" approach already used for the UTC/DEC/Ships indexing in
+pick #1. This closes out the last open "maybe we need a hook" thread — the Uniswap pick needs
+zero custom hook code, for any of the reasons considered across this whole section.
+
+**Pitch (2026-09-10):** Uniswap is the biggest bet of the three picks, and that's an honest way
+to frame it rather than a sales point. `purchaseUTCWithFlow` mints UTC at a fixed rate
+(`tierShips[_tier] * ships.recycleReward()`, e.g. 0.5–6.0 UTC per tier) with no burn and no
+secondary market — `docs/UTC_Price_Prediction_10k_Players.md` already assumes an external UTC
+market price exists to arbitrage against, and today it doesn't. Deploying a real UTC/ETH v4 pool
+with a fee-on-swap hook feeding the burn/treasury flow would actually build that missing piece
+and close the loop the doc only models on paper. But it's a real economic mechanism, not a
+wrapper integration: we don't yet know if hook fees should route into `ShipPurchaser.sol`'s
+existing `owner()` treasury withdrawal or a new burn sink, and we haven't scoped liquidity
+seeding for a pool that needs to look believable in a demo, not just deploy successfully. It also
+requires a `FEEDBACK.md` and Uniswap Developer Feedback Form submission on top of the contract
+work. Compared to Chainlink VRF ($500, low-risk) and Ledger ($1,500, moderate), this is the
+largest prize and the most genuinely useful new feature — and the most likely to eat the clock or
+ship half-finished if we're not disciplined about scope.
+
+**Decision on the third slot is still open (2026-09-10)** — all three pitches above are live
+options; none has been chosen yet.
 
 ## Implementation notes (for whenever this moves from strategy to build)
 
