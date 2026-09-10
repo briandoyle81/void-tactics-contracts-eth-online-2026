@@ -124,6 +124,110 @@ walking raw chain events. Build:
   "From Scratch" one at lines 45-85 — document what's pre-existing (the whole game) vs. new (the
   subgraph/MCP work) per the track's requirements.
 
+**Re-examined 2026-09-09 — could this subgraph replace Walrus for match replay?** No, not
+cheaply, as the contracts stand. `Game.sol`'s only combat event —
+`Move(gameId, shipId, oldRow, oldCol, newRow, newCol, actionType, targetShipId)`
+(`contracts/Game.sol:88`) — covers ship movement + coarse action-type + target, which is enough
+for a real (if partial) "tactical trace" subgraph feature with **zero contract changes**. But
+damage dealt, resulting hull points, ship-destroyed-vs-fled status, which specific
+weapon/special/faction-ability actually resolved, and round number/running score are never
+emitted anywhere — `_performShoot`, `_removeShipFromGame` (`Game.sol`), `ShipsRouter.sol`,
+`SpecialEffectsLib.sol`, and `DestroyRewardLib.sol` are all event-less for this data; it exists
+only in storage or inside the Walrus `MatchRecord.turns` blob. Reaching full replay parity with
+that blob would mean adding several new, richer events to `Game.sol` — real per-action gas cost,
+and real risk given `Game.sol` is already within a few hundred bytes of the 24 KiB limit.
+**Recommendation: don't pitch this as a Walrus replacement.** The free "tactical trace" version
+(zero contract changes) is a legitimate *complementary* subgraph feature, not a substitute for
+full replay.
+
+**Flagged — needs confirmation, not asserted:** the live product may have already stopped
+writing to Walrus after the ETH NY 2026 hackathon it was built for — unconfirmed from this
+contracts repo (`GameBlobRegistry` is still deployed and wired in `DeployAndConfig.ts`, but the
+write path is entirely client-driven from the separate frontend repo, which isn't visible here).
+If Walrus is genuinely inactive in production today, "add a few richer combat events + a
+subgraph" stops being a redundant rebuild of a working feature and becomes restoring lost replay
+capability from scratch — which changes whether the `Game.sol` size/gas cost above is worth
+paying. Check the live frontend/backend's actual Walrus-write status before deciding either way.
+
+- **Correction:** the FreeShipClaim/TutorialClaim abuse-detection subgraph idea above only half
+  works as written. `TutorialClaim.sol` emits `TutorialCompleted(player, winPath, shipsCreated)`,
+  but `FreeShipClaim.sol` emits **no events at all**, so its claims aren't indexable yet. Adding
+  one event there is cheap (it's already a standalone contract, no size pressure) if this angle
+  is still wanted.
+
+**Follow-up, 2026-09-09 — Walrus confirmed permanently disabled; scoped a full-replay plan.**
+The "flagged, needs confirmation" item directly above is resolved: Walrus is confirmed off and
+not coming back, so there is currently **no replay capability at all** in the live product. That
+changes the calculus from the note above — this is no longer "rebuild a redundant feature," it's
+"restore lost capability from scratch." The goal, per direction: full step-by-step client replay
+— round number, running score, ship variant, exactly which special/faction ability fired
+(including its faction/slot identity), damage dealt, and destruction — reconstructable purely
+from on-chain events.
+
+Researched the exact data model and call graph needed (`Types.sol` enums/structs,
+`Game.sol`'s `_performShoot`/`_performSpecial`/`_performFactionAbility`/`_removeShipFromGame`/
+`_handleEndOfRound`/`startGame`, `SpecialEffectsLib.sol`) and confirmed the binding constraint:
+`Game.sol` is deployed at **23.993 KiB** against the 24 KiB (24,576-byte) EIP-170 limit —
+effectively zero headroom, confirmed via `npx hardhat compile --force` +
+`hardhat-contract-sizer`. Per `CLAUDE.md`, the size check is never disabled — this has to
+actually fit via refactoring, not a workaround.
+
+*Architecture (the escape valve):* `SpecialEffectsLib.sol`'s functions are `external` and take
+`GameData storage` — Solidity compiles calls to it as a DELEGATECALL stub at `Game.sol`'s call
+sites (confirmed by the file's own header comment) instead of inlining the logic, so code living
+inside it — including new events, ABI encoding, and `LOG` opcodes — is charged against *that
+library's own* budget (5.272 KiB deployed, lots of room), not `Game.sol`'s, while the emitted
+event still shows on-chain as coming from `Game.sol`'s address (delegatecall preserves
+`ADDRESS()`). Plan: one new library, `contracts/GameReplayLib.sol`, built the same way, plus a
+small extension to `SpecialEffectsLib.sol` itself for ability identity:
+
+1. **Round number** — add a `round` param to the *existing* `Move` event/emit site
+   (`Game.sol:88`, `:706`) rather than a new event; cheapest possible way to get it in.
+2. **Damage** — extract `_performShoot`'s damage formula (`Game.sol:824-836`) into
+   `GameReplayLib.resolveShotAndLog(...)`, emitting `Damage(gameId, shooterId, targetId, amount,
+   resultingHullPoints, round)`. Replaces inline arithmetic with a call, so likely
+   size-neutral-to-negative for `Game.sol` — do this one first and measure.
+3. **Ship removal** — `_removeShipFromGame` has 5 call sites, each already unambiguous about why
+   (`Retreat`, `ShotDestroyed`, `SpecialEffect`, `ReactorCritical`, `Debug`); thread a
+   `RemovalReason` enum through and call `GameReplayLib.logRemoval(gameId, shipId, reason,
+   round)`.
+4. **Round end** — one call in `_handleEndOfRound` after the score-increment block:
+   `GameReplayLib.logRoundEnd(gameId, round, creatorScore, joinerScore)`.
+5. **Ship loadout snapshot** — equipment (`mainWeapon`/`armor`/`shields`/`special`) is fully
+   mutable between matches via `DroneYard.modifyShip` (only `variant` is guarded), and nothing
+   per-game stores which loadout was active during a specific historical match — so one call at
+   `startGame` time, `GameReplayLib.logRoster(gameId, creatorShipIds, joinerShipIds, ships)`,
+   emitting one `ShipLoadout` event per ship.
+6. **Which ability fired** — `SpecialEffectsLib.resolveAndApply` already knows `variant` but not
+   the `Special` slot; add that field to its existing `ResolveContext` struct (cheap — the value
+   is already loaded in memory at both call sites) and emit `AbilityUsed(gameId, shipId, variant,
+   special, targetShipId)` from inside the library, which already has room.
+
+No new allowlist/auth is needed: a hostile direct (non-delegatecall) call to the library's own
+address would execute with `address(this)` == the library, not `Game.sol` — any forged event
+would be tagged as coming from the wrong address and a subgraph watching `Game.sol` specifically
+would never see it.
+
+*Alternative considered and rejected: Diamond proxy pattern (EIP-2535).* Would remove the 24 KiB
+ceiling on `Game.sol` permanently (not just for this feature) by making it a thin proxy over
+per-facet contracts. Rejected for this task: it's a full storage-layout rewrite of the entire
+game loop (not just 5-6 hook points), adds a permanent `fallback()` selector-lookup + delegatecall
+gas cost to *every* player action forever, carries real regression risk to a live game with 616
+passing tests, introduces a new audit surface (facet clashes, `diamondCut` permissions), and
+doesn't match this repo's already-established answer to "a core contract needs more room" —
+splitting logic into standalone authorized contracts (`FreeShipClaim.sol`, `TutorialClaim.sol`,
+`DroneYard.sol`, `ShipPurchaser.sol`, `SpecialEffectsLib.sol`), which is what the plan above
+already does. If the team wants to solve the *recurring* "core contracts keep hitting 24 KiB"
+problem structurally, Diamond is worth its own dedicated evaluation later, decoupled from this
+feature.
+
+*Build order:* extract shoot-damage first and measure `Game.sol`'s size before proceeding to the
+smaller additive stubs (round-on-Move, round-end, removal-reason, `ResolveContext` extension),
+with the roster/loadout snapshot last (least urgent, easiest to defer if room runs out). Existing
+tests asserting the old `Move`/`_removeShipFromGame` signatures will need updating; new tests
+needed per new event. This is contracts-only — the subgraph that actually consumes these events
+for client replay is separate follow-on work under the Graph pick above.
+
 ### 2. World — Selfie Check — $3,500 pool, up to 3 teams at $1,166 each
 
 **Eligibility check:** unlike AgentKit ("🆕 This prize is only available to Continuity Track
