@@ -101,28 +101,88 @@ Kept out of the final picks; noted here for completeness, each checked against
 
 ## Locked-in picks (2 of 3 sponsors)
 
-### 1. The Graph — "Best AI Tooling or AI Use Case with The Graph (Continuity)" — $5,000 pool
+### 1. The Graph — ~~"Best AI Tooling or AI Use Case with The Graph (Continuity)" — $5,000 pool~~
 
-1st $2,500 / 2nd $1,500 / 3rd $1,000; explicitly tagged "🆕 This prize is only available to
-Continuity Track participants" at line 87, and the track body itself says "THIS TRACK IS THE
-CONTINUITY TRACK" at line 108 — distinct from the "From Scratch" pool at lines 45-85.
+**Pivoted 2026-09-10 — dropped the AI-Continuity track, switched to "Best Use of Composable or
+Standardized Graph Products" (lines 11-44 of `docs/eth-global-remote.md`), same $5,000 pool (1st
+$2,500 / 2nd $1,500 / 3rd $1,000).** Reasoning: the game's own AI (`AIShips`/`AIBehavior`/
+`RoguelikeAIController`) is deterministic, hardcoded priority-list PvE — not an autonomous agent
+concept (see the "Wrong" bullet under Context above) — so leaning on "AI" framing for this pick
+would have been the same dishonest-framing mistake already caught and rejected once for the
+AgentKit pitch. The AI-Continuity track's own eligibility only worked if we actually built a
+Subgraph MCP server as new AI-facing tooling; we decided that's not worth doing. Note this new
+track carries **no Continuity-only tag** (unlike the AI-Continuity track) — open to both pools,
+so no protected smaller field, same as the World/Selfie Check pick.
+
+The Composable/Standardized track explicitly rules out a single ad-hoc custom subgraph:
+"Simply querying one Subgraph with no composition or standardization does not qualify" (line 27).
+It qualifies two other ways instead (line 25): compose 2+ Graph products, or build meaningfully
+on a standardized schema. Going with the standardized-schema path — confirmed via
+`grep -n "is ERC20\|is ERC721" contracts/*.sol`: `UniversalCredits.sol` (UTC) and
+`DroneEnergyCores.sol` (DEC) are `ERC20`; `Ships.sol` and `ShatteredHiveMedal.sol` are `ERC721`.
 
 No indexer exists anywhere in this repo (or, as far as the contracts repo shows, the separate
-frontend repo) — `GameResults`, `Tournament`, `Fleets`, and claim events are only readable by
-walking raw chain events. Build:
+frontend repo) — `GameResults`, `Tournament`, `Fleets`, and claim events, plus all UTC/DEC/Ships/
+medal transfer activity, are only readable by walking raw chain events today. Build:
 
-- A Subgraph indexing `GameResults` (wins/losses), `Tournament` (registrations, brackets, match
-  results — `contracts/Tournament.sol`), and `FreeShipClaim`/`TutorialClaim` claim events.
-- A Subgraph MCP server (or direct Subgraph Studio queries) exposing natural-language queries
-  over this data — e.g. "show me every wallet that claimed free ships from a cluster of
-  same-block-funded fresh addresses," which doubles as a real abuse-detection tool for the World
-  track below. This is what makes the three picks form one coherent story instead of three
-  disconnected integrations.
+- A Subgraph indexing UTC, DEC, Ships, and `ShatteredHiveMedal` transfer/mint/burn activity using
+  Messari's **Standardized Subgraph** schema for ERC-20/ERC-721 (authoring/extending a
+  Standardized Subgraph is explicitly in scope per line 28) instead of ad-hoc custom entity
+  types for that part.
+- Custom entities layered on top, in the same subgraph, for the game-specific data that has no
+  standard schema to map to: `GameResults` (wins/losses), `Tournament` (registrations, brackets,
+  match results — `contracts/Tournament.sol`), and `FreeShipClaim`/`TutorialClaim` claim events.
 - Consume live data via an API key from Subgraph Studio (mocked/local data does not qualify per
-  the track's own rules).
-- Submit under the explicit "THIS TRACK IS THE CONTINUITY TRACK" pool (lines 86-127), not the
-  "From Scratch" one at lines 45-85 — document what's pre-existing (the whole game) vs. new (the
-  subgraph/MCP work) per the track's requirements.
+  the track's own rules, line 26).
+- Submit under this track (lines 11-44), documenting the standards leverage per its own
+  requirement (line 29: "show what became easier because a shared schema or composed product was
+  used").
+
+**Why this is worth building independent of the prize** (all four uses discussed and confirmed
+2026-09-10):
+
+1. **Replaces raw event-scanning the frontend already has to do.** No indexer exists today for
+   `GameResults`/`Tournament`/claim events — any UI showing win/loss history, tournament results,
+   or claim history currently means custom log-scanning outside this repo. A subgraph turns that
+   into a GraphQL query.
+2. **Sybil/abuse detection for a live, unpatched gap.** `FreeShipClaim`/`TutorialClaim` have zero
+   human-uniqueness protection (address-keyed only) — already a real, currently-exploitable issue
+   independent of the hackathon (see the "New and strong" bullet under Context above). Once claim
+   events are indexed, the abuse pattern (same-block-funded fresh wallets, repeat-claim attempts)
+   becomes queryable instead of requiring manual log inspection. Pairs directly with the World/
+   Selfie Check pick below — this becomes the tool that demonstrates the gap and later verifies
+   the gating works.
+3. **Economy transparency**, continuing the direction of the "Update burnable for
+   economy/transparency" commit — a public, queryable ledger of UTC/DEC supply, burn rate, and
+   top holders via the standardized ERC-20 schema, without custom aggregation code. Gives
+   `docs/UTC_Price_Prediction_10k_Players.md`'s modeling something real to check against later.
+4. **Ship/medal provenance** — free transfer history for Ships and `ShatteredHiveMedal` via the
+   standardized ERC-721 schema, useful for any future marketplace or ship-history feature.
+
+(1) and (2) are the load-bearing reasons — real gaps that exist independent of the prize. (3) and
+(4) are byproducts of the same build. None of this requires the PvE bots to be "real AI."
+
+**Dashboard, added to the plan 2026-09-10.** One dashboard, one panel per use case above, each
+querying the subgraph via GraphQL — this is the concrete "what became easier" artifact the track
+itself asks for (line 29) and doubles as the demo-video content:
+
+1. **Player history panel** — per-wallet lookup: win/loss record (`GameResults`), tournament
+   registrations/results (`Tournament`), and free-ship/tutorial claim history. Replaces the
+   frontend's current raw-log-scanning for this data.
+2. **Abuse-detection panel** — flags wallet clusters funded in the same block that then claim,
+   and repeat-claim attempts against `FreeShipClaim`/`TutorialClaim`. This is an ops/admin view,
+   not player-facing; it's the concrete evidence piece for the still-open human-uniqueness gap,
+   and later the before/after proof once the World/Selfie Check gating (pick #2) ships.
+3. **Economy panel** — UTC/DEC supply over time, mint vs. burn rate, top holders, using the
+   standardized ERC-20 transfer/mint/burn entities. Public-facing, continuing the "economy/
+   transparency" direction already underway.
+4. **Ship/medal provenance panel** — per-token lookup for any `Ships`/`ShatteredHiveMedal` id
+   showing its full ownership/transfer history via the standardized ERC-721 entities.
+
+Scope note: this is a frontend deliverable (a small standalone page or app consuming the subgraph
+over GraphQL), not a contracts change — it belongs wherever the existing frontend work lives, not
+in this repo. No contract-size or deploy-safety implications here; the only dependency is the
+subgraph itself being deployed and queryable first.
 
 **Re-examined 2026-09-09 — could this subgraph replace Walrus for match replay?** No, not
 cheaply, as the contracts stand. `Game.sol`'s only combat event —
