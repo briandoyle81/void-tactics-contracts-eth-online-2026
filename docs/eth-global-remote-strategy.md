@@ -531,6 +531,10 @@ over the floor, because the intent is for UTC to be a **utility asset, not a spe
 - **Monitor, don't defend.** Sustained below-mint drift is a signal to watch on the Graph
   economy-transparency panel (already planned in pick #1), not a condition to actively correct.
 
+*(See the sell-side lottery hook below, added 2026-09-10 — it reinforces this ceiling mechanic
+with a real incentive on top of the passive arbitrage described here, without adding a floor or
+any capital-at-risk defense.)*
+
 ~~**Re-evaluated against the track's own requirements (2026-09-10).** The track's description asks
 for "new v4 hooks, extensions or improvements... tooling or solutions built for the broader
 ecosystem" (`docs/eth-global-remote.md` Uniswap section) — a single, focused fee-to-treasury hook
@@ -594,7 +598,7 @@ was extra scope:
   price excursions are fine, and considered unlikely to matter in practice anyway. Given that,
   there is no goal left for an active hook (either variant) to serve.
 
-**Final design (resolved 2026-09-10): no hook at all.**
+~~**Final design (resolved 2026-09-10): no hook at all.**
 
 1. Deploy a UTC/ETH Uniswap v4 pool — no custom hook, vanilla pool.
 2. Seed initial liquidity from the UC/ETH already sitting in `ShipPurchaser`, withdrawable today
@@ -627,9 +631,88 @@ filtered to this pool's id, and price/volume for the dashboard's economy panel c
 free. Likely already covered by an existing standardized Uniswap v4 subgraph schema too, matching
 the same "build on a standardized schema" approach already used for the UTC/DEC/Ships indexing in
 pick #1. This closes out the last open "maybe we need a hook" thread — the Uniswap pick needs
-zero custom hook code, for any of the reasons considered across this whole section.
+zero custom hook code, for any of the reasons considered across this whole section.~~
 
-**Pitch (2026-09-10):** Uniswap is the biggest bet of the three picks, and that's an honest way
+**Superseded again, 2026-09-10 — a fourth hook idea surfaced that's different in kind from the
+first three, and survived scrutiny: a sell-side lottery for a unique ship.** Unlike the
+fee-to-treasury hook (redundant, worked against goal 2, read as a toll) and the active
+ceiling-enforcement hook (real round-trip exploit risk, unwanted anyway), this one doesn't move
+funds or enforce an invariant — it's a promotional mechanic tied to real game content, and it
+reinforces the existing passive ceiling rather than competing with it or replacing it.
+
+**Design: sell-side, size-weighted, address-capped, minimum-gated, rate-limited lottery.**
+
+- **Direction: sell-only.** Only UTC→native (`sell`) trades earn entries, not the reverse. This
+  is deliberate, not arbitrary: the ceiling-defending arbitrage trade (mint UTC at the fixed tier
+  rate, sell it into the pool when pool price exceeds that rate) *is* a UTC→native trade — making
+  only that direction earn entries gives the people already incentivized to defend the ceiling an
+  extra reason to actually act on smaller deviations, reinforcing the existing free mechanic
+  described above rather than adding a new one. It does nothing for the (intentionally
+  undefended) floor, and doesn't need to.
+- **One entry per address per draw, weighted by size.** Concretely: sum each address's qualifying
+  sell volume over the draw period, reset per draw; one weighted entry per address from that sum.
+  This avoids ambiguity about which trade counts if an address sells more than once in a period.
+- **Sybil resistance beyond the weighting.** Because only sells count, every entry-earning trade
+  must be preceded by actually acquiring UTC first (mint, buy, or earn through gameplay) — there
+  is no free round-trip the way a bidirectional "any trade" scheme would allow; a wash-trading
+  attacker pays real cost (fees plus having to first acquire what they sell) per entry, not just
+  gas.
+- **Minimum qualifying trade size, denominated in the native token (ETH), not in UTC.** Flagged
+  by the project owner as necessary, not optional: without this, a period of low UTC price makes
+  entries cheap in real terms even though the weighting is nominally "by size" — a large
+  UTC-denominated sell can still be a trivial real-dollar cost if UTC itself is cheap. Pricing the
+  floor in ETH insulates it from UTC's own price swings: no matter how low UTC trades, entering
+  still costs a real, fixed floor of actual value. Exact ETH figure still needs to be set —
+  scoping item, not resolved here.
+- **One drawing per 24 hours, permissionless trigger.** Rate-limits how often a unique ship gets
+  given away (preserving scarcity over time) and bounds how often a single depressed-price window
+  can matter, though it doesn't by itself fix a single draw being under-priced — that's what the
+  ETH-denominated minimum above is for; the two guards address different failure modes and are
+  both needed. Implementation-wise, this doesn't need a keeper: the hook checks elapsed time on
+  `afterSwap` and triggers the draw once 24h have passed since the last one, the same
+  permissionless "whoever's transaction happens to cross the threshold triggers it" pattern
+  `Tournament.buildBracket` already uses.
+- **Draw mechanism reuses existing infrastructure — no Chainlink VRF needed.** The draw is a
+  request-now/reveal-later cycle through the existing `RandomManager` (the same two-step pattern
+  `Ships.constructShip` and `Tournament.buildBracket` already use) — the triggering swap requests
+  randomness, and the winner reveal happens permissionlessly once the entropy window opens. This
+  keeps the pick fully independent of the dropped Chainlink VRF pick, using infrastructure this
+  repo already has.
+- **Prize minting reuses the existing authorized-minter pattern.** A small contract gets granted
+  minting rights via `isAllowedToCreateShips` (the same allowlist `ShipPurchaser`/`FreeShipClaim`/
+  `AIShips` already use) and mints the winning ship once the draw resolves, guarded so it can only
+  fire once per draw's prize.
+
+**Open questions, not yet resolved:**
+
+1. **What "1-of-a-kind" means across repeated draws.** A single ship that's fought over forever
+   only makes sense for one draw ever — but the 24h cadence implies a *recurring* mechanic. Most
+   likely intent: each draw period mints its own newly-generated unique variant as that period's
+   prize (a rotating "one unique ship per drawing," each individually one-of-a-kind), not a single
+   eternal prize — needs explicit confirmation before defining the mint path.
+2. **Weighted random selection is real implementation work, not trivial.** Picking a winner
+   fairly from an unknown number of addresses, weighted by their summed sell volume, needs an
+   on-chain data structure that supports a cheap, fair weighted pick (a cumulative-weight array
+   with binary search is the standard approach) — a genuine engineering task, larger than any
+   earlier version of this pick, though still far more scoped than the mint-and-sell ceiling hook
+   that was rejected for real exploit risk.
+3. **Whale dominance is inherent to size-weighting**, not a bug to fix by default — someone
+   selling a large stash in one draw period gets proportionally better odds, the same way
+   raffle-tickets-per-dollar promotions work elsewhere. Worth deciding whether to cap max weight
+   per entry, or accept it as-is.
+4. **Exact ETH-denominated minimum entry threshold** — needs an actual number, informed by
+   `docs/UTC_Price_Prediction_10k_Players.md`'s (re-examined, ETH-denominated) figures once that
+   doc is updated, not invented independently of it.
+
+**Competitiveness, revised.** This reverses the "least differentiated version of this pick"
+assessment from the earlier draft above — a sell-side lottery tied to unique game content is a
+genuinely novel, demoable hook, not a generic DeFi pattern every other submission in this track
+will also have. That comes at the cost of real, nontrivial implementation work (weighted
+selection, the two-step draw, the minter guard) — a bigger lift than the vanilla-pool version, but
+smaller and much lower-risk than the rejected ceiling-defense hook, since nothing here moves funds
+or enforces a price invariant that could be gamed for direct extraction.
+
+~~**Pitch (2026-09-10):** Uniswap is the biggest bet of the three picks, and that's an honest way
 to frame it rather than a sales point. `purchaseUTCWithFlow` mints UTC at a fixed rate
 (`tierShips[_tier] * ships.recycleReward()`, e.g. 0.5–6.0 UTC per tier) with no burn and no
 secondary market — `docs/UTC_Price_Prediction_10k_Players.md` already assumes an external UTC
@@ -642,10 +725,17 @@ seeding for a pool that needs to look believable in a demo, not just deploy succ
 requires a `FEEDBACK.md` and Uniswap Developer Feedback Form submission on top of the contract
 work. Compared to Chainlink VRF ($500, low-risk) and Ledger ($1,500, moderate), this is the
 largest prize and the most genuinely useful new feature — and the most likely to eat the clock or
-ship half-finished if we're not disciplined about scope.
+ship half-finished if we're not disciplined about scope.~~ — describes the fee-to-treasury design,
+superseded above; kept for the record, not current.
 
-**Decision on the third slot is still open (2026-09-10)** — all three pitches above are live
-options; none has been chosen yet.
+**Third-slot status (2026-09-10):** Chainlink VRF is explicitly declined by the project owner —
+down to Ledger and Uniswap. Current lean is **Ledger**, with its eligibility flag (whether the
+Continuity sub-prize is bound by the parent track's "AI agents" framing) needing a quick check
+against the track's own organizers before committing build time — the sub-prize's own qualification
+text doesn't mention AI at all, so this leans toward "probably fine, worth confirming" rather than
+genuinely open. Uniswap remains a live fallback with real independent product value (the sell-side
+lottery hook design above), just a bigger build with no unresolved eligibility risk of its own.
+Not yet finalized.
 
 ## Implementation notes (for whenever this moves from strategy to build)
 
