@@ -56,21 +56,29 @@ contract UTCLotteryHook is BaseHook, Ownable {
     // Minimum ETH proceeds (native-token side of the swap) a single sell
     // must clear to earn an entry, denominated in wei — deliberately in ETH,
     // not UTC, so a period of low UTC price can't make entries artificially
-    // cheap. Not preset to a specific figure here; owner-configurable so it
-    // can be set from real data once docs/UTC_Price_Prediction_10k_Players.md
-    // is re-examined against the live ETH-denominated deployment (see the
-    // strategy doc's open questions for this pick).
-    uint256 public minEntryThresholdWei;
+    // cheap. Owner-configurable; defaults to 0.01 ETH.
+    uint256 public minEntryThresholdWei = 0.01 ether;
 
-    uint256 public constant DRAW_INTERVAL = 24 hours;
+    // A draw only starts once ALL of these hold: at least drawInterval has
+    // elapsed since the last draw started, AND the draw has accumulated at
+    // least minParticipants distinct qualifying sellers, AND at least
+    // minTotalWeightWei total qualifying volume. Time alone is deliberately
+    // not enough — if a draw hasn't reached eligibility once drawInterval
+    // has passed, it simply keeps running (no state changes, no reset)
+    // until it does, checked again on each subsequent qualifying swap. All
+    // three are owner-configurable.
+    uint256 public drawInterval = 24 hours;
+    uint256 public minParticipants = 3;
+    uint256 public minTotalWeightWei;
     uint256 public lastDrawTime;
     uint256 public currentDrawId;
 
     // Weight = ETH proceeds of a qualifying sell (not raw UTC amount) — the
     // same figure the entry threshold is checked against, so a manipulated
     // or crashed UTC price can't inflate weight independent of real value
-    // contributed. One accumulated weighted entry per address per draw, not
-    // one entry per trade.
+    // contributed. One entry per address per draw, sized to that address's
+    // single best (highest) qualifying sell in the period — not a sum
+    // across all their trades — see _recordSell.
     mapping(uint256 => address[]) public drawParticipants;
     mapping(uint256 => mapping(address => bool)) public hasParticipated;
     mapping(uint256 => mapping(address => uint256)) public weightInDraw;
@@ -269,17 +277,37 @@ contract UTCLotteryHook is BaseHook, Ownable {
             hasParticipated[drawId][_player] = true;
             drawParticipants[drawId].push(_player);
         }
-        weightInDraw[drawId][_player] += ethProceeds;
-        totalWeightInDraw[drawId] += ethProceeds;
+
+        // Ticket size is the player's single best qualifying sell in the
+        // draw, not a running sum — a newer, higher-value sell replaces it;
+        // a newer but lower (or equal) one leaves the existing ticket alone.
+        // This is deliberate: summing would let an address inflate its odds
+        // by splitting one large sell into many smaller ones instead of one
+        // trade actually being bigger.
+        uint256 previousWeight = weightInDraw[drawId][_player];
+        if (ethProceeds > previousWeight) {
+            totalWeightInDraw[drawId] =
+                totalWeightInDraw[drawId] -
+                previousWeight +
+                ethProceeds;
+            weightInDraw[drawId][_player] = ethProceeds;
+        }
 
         emit SellRecorded(drawId, _player, ethProceeds, weightInDraw[drawId][_player]);
     }
 
     function _maybeStartDraw() internal {
         uint256 drawId = currentDrawId;
+        // totalWeightInDraw[drawId] == 0 is checked explicitly, not just
+        // implied by minTotalWeightWei/minParticipants, since both of those
+        // are owner-configurable down to 0 — this floor always applies
+        // regardless of configuration, so a draw can never start with
+        // nothing in it.
         if (
-            block.timestamp < lastDrawTime + DRAW_INTERVAL ||
-            totalWeightInDraw[drawId] == 0
+            block.timestamp < lastDrawTime + drawInterval ||
+            totalWeightInDraw[drawId] == 0 ||
+            totalWeightInDraw[drawId] < minTotalWeightWei ||
+            drawParticipants[drawId].length < minParticipants
         ) {
             return;
         }
@@ -389,6 +417,18 @@ contract UTCLotteryHook is BaseHook, Ownable {
 
     function setMinEntryThresholdWei(uint256 _minEntryThresholdWei) external onlyOwner {
         minEntryThresholdWei = _minEntryThresholdWei;
+    }
+
+    function setDrawInterval(uint256 _drawInterval) external onlyOwner {
+        drawInterval = _drawInterval;
+    }
+
+    function setMinParticipants(uint256 _minParticipants) external onlyOwner {
+        minParticipants = _minParticipants;
+    }
+
+    function setMinTotalWeightWei(uint256 _minTotalWeightWei) external onlyOwner {
+        minTotalWeightWei = _minTotalWeightWei;
     }
 
     // Appends one hand-crafted template to the back of the queue (FIFO —

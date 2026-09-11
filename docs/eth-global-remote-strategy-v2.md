@@ -151,25 +151,35 @@ no budgeted fallback if this pick doesn't ship.
    `ShipPurchaser`'s fixed tier price and sell into the pool for profit whenever pool price rises
    above it. Zero new code. Deliberately not pinned tight; occasional excursions above the mint
    rate are accepted by design.
-4. **Sell-side lottery hook — built and tested** (`contracts/UTCLotteryHook.sol`, 637/637 repo
-   tests passing, including 14 dedicated to this contract):
+4. **Sell-side lottery hook — built and tested** (`contracts/UTCLotteryHook.sol`, 643/643 repo
+   tests passing, including 20 dedicated to this contract):
    - Only UTC→native (`sell`) trades earn entries — reinforces the ceiling arbitrage above (that
      arbitrage trade *is* a sell) rather than competing with it, and adds no floor.
-   - One weighted entry per address per draw period; weight = that address's summed qualifying
-     sell volume over the period. Winner selection: a linear cumulative-weight scan over that
-     draw's unique participants (not binary search — simpler, fully sufficient at this scale, no
-     need for a fancier structure).
+   - One entry per address per draw, sized to that address's **single best (highest) qualifying
+     sell in the period — not a sum** across all their trades: a newer, higher-value sell replaces
+     the recorded ticket; a newer but lower one leaves it alone. Deliberate — summing would let an
+     address inflate its odds by splitting one large sell into many small ones. Winner selection:
+     a linear cumulative-weight scan over that draw's unique participants (not binary search —
+     simpler, fully sufficient at this scale).
    - Minimum qualifying trade size **denominated in ETH, not UTC** (`minEntryThresholdWei`) —
-     insulates entry cost from UTC's own price swings. Exact figure still **not yet set** — should
-     be informed by `docs/UTC_Price_Prediction_10k_Players.md` once that doc is re-examined
-     against the live ETH-denominated Base Sepolia deployment (it currently models
-     FLOW-denominated figures).
-   - One drawing per 24 hours maximum, permissionlessly triggered — the hook checks elapsed time
-     on `afterSwap` and fires once due, the same permissionless-trigger pattern
-     `Tournament.buildBracket` already uses.
+     insulates entry cost from UTC's own price swings. **Set to 0.01 ETH.**
+   - **Draw eligibility — resolved, and more than just a timer.** A draw only starts once *all*
+     of the following hold: `drawInterval` has elapsed since the last draw started (default 24h),
+     the draw has **≥ `minParticipants` distinct qualifying sellers (default 3)**, and **≥
+     `minTotalWeightWei` total qualifying volume (default 0)**. All three are owner-configurable.
+     Time alone is deliberately not sufficient — if a draw hasn't reached eligibility once
+     `drawInterval` has passed, it simply keeps running (no state change, no reset) until it does,
+     re-checked on every subsequent qualifying swap. A hard `totalWeight == 0` floor always
+     applies regardless of configuration, so a degenerate admin setting (both minimums at 0)
+     still can't start a draw with literally nothing in it. Triggering itself remains
+     permissionless and incidental (checked inside `afterSwap`, not a dedicated standalone
+     function) — deliberately fine given eligibility is now activity-gated: if nobody's trading,
+     the draw isn't eligible to start anyway, so nothing is lost by not having an explicit
+     "start next" call independent of trade activity.
    - Draw resolution reuses the existing `RandomManager` (request-now/reveal-later, the same
      two-step pattern `Ships.constructShip`/`Tournament.buildBracket` already use) — no Chainlink
-     VRF dependency.
+     VRF dependency. `resolveDraw` itself **is** a dedicated, permissionless function anyone can
+     call once ready.
    - **Prize mechanism — resolved.** The owner queues up to 5 hand-crafted `PrizeTemplate`s
      (`queuePrizeTemplate`/`clearPrizeQueue`/`queueLength`) — each resolved draw dequeues the
      oldest (FIFO) and mints it via `Ships.createSpecificShip` (not the generic random-rolled
@@ -197,16 +207,16 @@ no budgeted fallback if this pick doesn't ship.
 
 **Still open / not yet done:**
 
-1. The exact ETH-denominated minimum entry threshold (see above) — needs a real number, not
-   invented independently of `docs/UTC_Price_Prediction_10k_Players.md`.
-2. Whether to cap max weight per entry. Whale dominance is an inherent property of size-weighting,
-   not automatically a bug — decide deliberately rather than defaulting either way.
-3. No pool has actually been deployed yet (build items 1-3 above are still real deploy-time work,
+1. `minEntryThresholdWei` (0.01 ETH), `drawInterval` (24h), `minParticipants` (3), and
+   `minTotalWeightWei` (0) are all live, sensible-but-not-yet-validated defaults — worth
+   confirming against real expected trading volume once there's live data to check them against,
+   not left as permanent assumptions.
+2. No pool has actually been deployed yet (build items 1-3 above are still real deploy-time work,
    Base Sepolia only, per this repo's deploy-safety rules) — `UTCLotteryHook.sol` itself is built
    and tested against a real local `PoolManager`, but isn't live anywhere.
-4. The prize queue starts empty — no `PrizeTemplate`s have actually been curated/queued yet; until
+3. The prize queue starts empty — no `PrizeTemplate`s have actually been curated/queued yet; until
    the owner does, every draw uses the random-4-star fallback.
-5. `fallbackVariant` defaults to `1` (owner-configurable) — worth confirming that's actually the
+4. `fallbackVariant` defaults to `1` (owner-configurable) — worth confirming that's actually the
    intended variant for the fallback prize before going live.
 
 ### Fallback / 4th priority — Ledger: "Continuity" track, $1,500 (1st $1,000 / 2nd $500)

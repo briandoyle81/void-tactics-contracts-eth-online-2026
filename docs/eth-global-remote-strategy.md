@@ -712,6 +712,47 @@ selection, the two-step draw, the minter guard) — a bigger lift than the vanil
 smaller and much lower-risk than the rejected ceiling-defense hook, since nothing here moves funds
 or enforces a price invariant that could be gamed for direct extraction.
 
+**Addendum — built, tested, and materially revised from the design above (2026-09-11).**
+`contracts/UTCLotteryHook.sol` exists now; 643/643 repo tests pass, 20 dedicated to this contract.
+The live, current spec lives in `docs/eth-global-remote-strategy-v2.md` (Pick 3, item 4) — this
+note is the historical record of what changed between the design above and what actually got
+built, not a restatement of the current design.
+
+- **Weighting reworked from sum to max.** The design above said "summed qualifying sell volume" —
+  built and shipped that way first, then corrected on direction from the project owner: an
+  address's entry is now its single best (highest) qualifying sell in the draw, not a sum, so
+  splitting one large sell into many small ones can't inflate odds.
+- **Prize mechanism went through three real iterations, not one.** First built as owner-configured
+  `prizeVariant`/`prizeTier` through the generic `createShips` — genuinely not "1-of-a-kind" in any
+  enforced sense, just a labeling convention. Corrected to a single hand-crafted `PrizeTemplate`
+  minted via `Ships.createSpecificShip` (per direction), which also surfaced a real invariant this
+  design would have silently violated — `Ships.sol` doesn't itself stop a ship from having both
+  armor and shields, `DroneYard.sol`'s `ArmorAndShieldsBothSet` check does, and this hook calls
+  `Ships.sol` directly, bypassing that check entirely unless re-validated here. Then corrected
+  again to a full 5-slot FIFO queue (`queuePrizeTemplate`) with a random-4-star fallback
+  (`Ships.createShips(winner, 1, fallbackVariant, 4, false)`, reusing `Ships.sol`'s existing
+  tier-4/rank-5 logic — no new generation code) for when the queue is empty, per direction.
+- **A real correctness bug caught before it shipped: `tx.origin`.** The first draft of
+  `_afterSwap` used `tx.origin` to attribute a sell to a player. Wrong on two counts — the `sender`
+  PoolManager passes is the calling router, not the trader, and `tx.origin` misattributes any
+  trade routed through a smart-contract wallet (this project already uses Dynamic for wallet
+  auth). Fixed to decode the real trader from `hookData` instead. This is now a standing project
+  rule (`CLAUDE.md`, "Never Use `tx.origin`"), not just a one-off fix.
+- **Draw eligibility became genuinely activity-gated, not just time-gated**, per direction: a draw
+  now also needs `minParticipants` (default 3) distinct sellers and `minTotalWeightWei` (default
+  0) total volume before it can start, alongside `drawInterval` (default 24h, no longer a hardcoded
+  constant) — all three owner-configurable. If eligibility isn't reached by the interval mark, the
+  same draw keeps accumulating rather than starting or resetting.
+- **The real-swap integration test turned into real infrastructure work**, not just a test file:
+  Uniswap's actual `PoolManager` needs a CREATE2-mined address (hook permissions are encoded in
+  the low bits of the deployed address), which needed `contracts/Create2Deployer.sol` and a
+  TypeScript port of Uniswap's own `HookMiner.sol` (`scripts/hookMiner.ts`, since this is
+  Hardhat/viem, not Foundry) — real, reusable deployment tooling, not disposable test scaffolding.
+  Getting `PoolManager.sol` to compile at all also needed isolating a ~50-file transient-storage
+  dependency closure into its own Cancun/viaIR compiler job in `hardhat.config.ts`, kept separate
+  from the main compiler pass specifically to avoid risking `Game.sol`'s already-razor-thin 24 KiB
+  budget — confirmed byte-for-byte unaffected before and after.
+
 ~~**Pitch (2026-09-10):** Uniswap is the biggest bet of the three picks, and that's an honest way
 to frame it rather than a sales point. `purchaseUTCWithFlow` mints UTC at a fixed rate
 (`tierShips[_tier] * ships.recycleReward()`, e.g. 0.5–6.0 UTC per tier) with no burn and no
@@ -728,14 +769,17 @@ largest prize and the most genuinely useful new feature — and the most likely 
 ship half-finished if we're not disciplined about scope.~~ — describes the fee-to-treasury design,
 superseded above; kept for the record, not current.
 
-**Third-slot status (2026-09-10):** Chainlink VRF is explicitly declined by the project owner —
+~~**Third-slot status (2026-09-10):** Chainlink VRF is explicitly declined by the project owner —
 down to Ledger and Uniswap. Current lean is **Ledger**, with its eligibility flag (whether the
 Continuity sub-prize is bound by the parent track's "AI agents" framing) needing a quick check
 against the track's own organizers before committing build time — the sub-prize's own qualification
 text doesn't mention AI at all, so this leans toward "probably fine, worth confirming" rather than
 genuinely open. Uniswap remains a live fallback with real independent product value (the sell-side
 lottery hook design above), just a bigger build with no unresolved eligibility risk of its own.
-Not yet finalized.
+Not yet finalized.~~ — **superseded (2026-09-10, same day):** direction flipped this to **Uniswap
+primary, Ledger fallback / 4th priority** — see `docs/eth-global-remote-strategy-v2.md`, which is
+the current live plan for this. Uniswap has since been substantially built out (see the addendum
+above); Ledger remains fully unbuilt, only-if-Uniswap-falls-through.
 
 ## Implementation notes (for whenever this moves from strategy to build)
 
