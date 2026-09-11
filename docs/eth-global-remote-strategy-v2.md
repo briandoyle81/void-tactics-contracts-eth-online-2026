@@ -151,37 +151,63 @@ no budgeted fallback if this pick doesn't ship.
    `ShipPurchaser`'s fixed tier price and sell into the pool for profit whenever pool price rises
    above it. Zero new code. Deliberately not pinned tight; occasional excursions above the mint
    rate are accepted by design.
-4. **Sell-side lottery hook** for a unique-ship prize, attached to the pool:
+4. **Sell-side lottery hook — built and tested** (`contracts/UTCLotteryHook.sol`, 637/637 repo
+   tests passing, including 14 dedicated to this contract):
    - Only UTC→native (`sell`) trades earn entries — reinforces the ceiling arbitrage above (that
      arbitrage trade *is* a sell) rather than competing with it, and adds no floor.
    - One weighted entry per address per draw period; weight = that address's summed qualifying
-     sell volume over the period.
-   - Minimum qualifying trade size **denominated in ETH, not UTC** — insulates entry cost from
-     UTC's own price swings. Exact ETH figure: **not yet set** — should be informed by
-     `docs/UTC_Price_Prediction_10k_Players.md` once that doc is re-examined against the live
-     ETH-denominated Base Sepolia deployment (it currently models FLOW-denominated figures).
+     sell volume over the period. Winner selection: a linear cumulative-weight scan over that
+     draw's unique participants (not binary search — simpler, fully sufficient at this scale, no
+     need for a fancier structure).
+   - Minimum qualifying trade size **denominated in ETH, not UTC** (`minEntryThresholdWei`) —
+     insulates entry cost from UTC's own price swings. Exact figure still **not yet set** — should
+     be informed by `docs/UTC_Price_Prediction_10k_Players.md` once that doc is re-examined
+     against the live ETH-denominated Base Sepolia deployment (it currently models
+     FLOW-denominated figures).
    - One drawing per 24 hours maximum, permissionlessly triggered — the hook checks elapsed time
      on `afterSwap` and fires once due, the same permissionless-trigger pattern
      `Tournament.buildBracket` already uses.
    - Draw resolution reuses the existing `RandomManager` (request-now/reveal-later, the same
      two-step pattern `Ships.constructShip`/`Tournament.buildBracket` already use) — no Chainlink
      VRF dependency.
-   - Prize minting reuses the existing `isAllowedToCreateShips` authorized-minter allowlist
-     pattern; guarded so the mint can only fire once per draw's prize.
+   - **Prize mechanism — resolved.** The owner queues up to 5 hand-crafted `PrizeTemplate`s
+     (`queuePrizeTemplate`/`clearPrizeQueue`/`queueLength`) — each resolved draw dequeues the
+     oldest (FIFO) and mints it via `Ships.createSpecificShip` (not the generic random-rolled
+     path), with the ship's name embedding the draw id ("Legendary Draw #N") so winners are
+     provably distinct from each other. Validated at queue-time: variant within
+     `Ships.maxVariant()`, armor/shields mutual exclusivity (neither is enforced by
+     `createSpecificShip` itself), stat tiers ≤ 2. **If the queue is empty, falls back to a random
+     "4-star" ship** — `Ships.createShips(winner, 1, fallbackVariant, 4, false)`, which (via
+     `Ships.sol`'s own existing tier-based rank logic) gives that single mint the tier-4 rank
+     count's first slot — rank 5, the same top rank a real tier-4 pack's first ship gets — through
+     the ordinary random-generation path (winner still calls `constructShip` themselves to reveal
+     it, same as any other purchased ship). No new generation logic — reuses `Ships.sol`'s
+     existing, already-authorized mechanism exactly as `purchaseWithFlow` does for a tier-4 pack's
+     best slot.
+   - Real Uniswap v4 hook mechanics confirmed along the way, not assumed: hook addresses are
+     permission-encoded (low 14 bits must match declared permissions), so deployment needs a mined
+     CREATE2 salt — `contracts/Create2Deployer.sol` + `scripts/hookMiner.ts` (a TypeScript port of
+     Uniswap's own `HookMiner.sol`, since this is Hardhat/viem, not Foundry) handle this. The
+     trader identity a hook receives from `PoolManager` is the calling *router*, not the end user —
+     `sender`/`tx.origin` were both rejected (see `CLAUDE.md`'s "Never Use `tx.origin`" rule, added
+     from this exact finding); the hook decodes the real trader from `hookData`
+     (`abi.encode(address)`) instead, which the frontend/router must populate.
 5. `FEEDBACK.md` + Uniswap Developer Feedback Form submission, per the track's qualification
    requirements.
 
-**Open questions to resolve before/during build:**
+**Still open / not yet done:**
 
-1. What "1-of-a-kind" means across repeated draws — likely each draw period mints its own newly
-   generated unique variant (a rotating one-of-a-kind per drawing), not one eternal ship fought
-   over forever. Needs explicit confirmation before the mint path is defined.
-2. Weighted random selection needs a real on-chain data structure (e.g. a cumulative-weight array
-   with binary search) to fairly and cheaply pick a winner from an unknown number of addresses —
-   genuine implementation work, not boilerplate.
-3. Whether to cap max weight per entry. Whale dominance is an inherent property of size-weighting,
+1. The exact ETH-denominated minimum entry threshold (see above) — needs a real number, not
+   invented independently of `docs/UTC_Price_Prediction_10k_Players.md`.
+2. Whether to cap max weight per entry. Whale dominance is an inherent property of size-weighting,
    not automatically a bug — decide deliberately rather than defaulting either way.
-4. The exact ETH-denominated minimum entry threshold (see above).
+3. No pool has actually been deployed yet (build items 1-3 above are still real deploy-time work,
+   Base Sepolia only, per this repo's deploy-safety rules) — `UTCLotteryHook.sol` itself is built
+   and tested against a real local `PoolManager`, but isn't live anywhere.
+4. The prize queue starts empty — no `PrizeTemplate`s have actually been curated/queued yet; until
+   the owner does, every draw uses the random-4-star fallback.
+5. `fallbackVariant` defaults to `1` (owner-configurable) — worth confirming that's actually the
+   intended variant for the fallback prize before going live.
 
 ### Fallback / 4th priority — Ledger: "Continuity" track, $1,500 (1st $1,000 / 2nd $500)
 

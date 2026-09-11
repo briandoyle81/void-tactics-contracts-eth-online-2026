@@ -240,18 +240,32 @@ describe("UTCLotteryHook — real swap integration", function () {
     ).to.equal(false);
   });
 
-  it("runs a full draw cycle end to end: sell -> 24h -> trigger -> resolve -> ship minted", async function () {
-    const {
-      poolManager,
-      liquidityRouter,
-      swapRouter,
-      key,
-      hook,
-      ships,
-      lp,
-      trader,
-    } = await loadFixture(deployFixture);
+  const validTemplate = {
+    variant: 1,
+    colors: {
+      h1: 45,
+      s1: 100,
+      l1: 50,
+      h2: 45,
+      s2: 100,
+      l2: 50,
+      h3: 45,
+      s3: 100,
+      l3: 50,
+    },
+    accuracy: 2,
+    hull: 2,
+    speed: 2,
+    mainWeapon: 0, // MainWeapon.Generic
+    armor: 3, // Armor.Heavy
+    shields: 0, // Shields.None
+    special: 0, // Special.None
+  };
 
+  async function setUpPoolAndLiquidity(
+    fixture: Awaited<ReturnType<typeof deployFixture>>,
+  ) {
+    const { poolManager, liquidityRouter, key, lp } = fixture;
     await poolManager.write.initialize([key, SQRT_PRICE_1_1]);
     await liquidityRouter.write.modifyLiquidity(
       [
@@ -266,10 +280,12 @@ describe("UTCLotteryHook — real swap integration", function () {
       ],
       { account: lp.account, value: parseEther("5") },
     );
+  }
 
-    // Constructor already seeds a valid default prizeTemplate — no setup
-    // call needed for this test.
-
+  async function runFullDrawCycle(
+    fixture: Awaited<ReturnType<typeof deployFixture>>,
+  ) {
+    const { swapRouter, key, hook, trader } = fixture;
     const hookData = encodeAbiParameters(
       [{ type: "address" }],
       [getAddress(trader.account.address)],
@@ -302,12 +318,17 @@ describe("UTCLotteryHook — real swap integration", function () {
     // request's commit block before it can be revealed.
     await hre.network.provider.send("evm_mine");
 
-    const shipCountBefore = await ships.read.shipCount();
     await hook.write.resolveDraw([0n]);
-    const shipCountAfter = await ships.read.shipCount();
-
-    expect(shipCountAfter - shipCountBefore).to.equal(1n);
     expect(await hook.read.drawResolved([0n])).to.equal(true);
+  }
+
+  it("runs a full draw cycle with a queued template: sell -> 24h -> trigger -> resolve -> hand-crafted ship minted", async function () {
+    const fixture = await loadFixture(deployFixture);
+    const { hookAsOwner, ships, trader } = fixture;
+    await setUpPoolAndLiquidity(fixture);
+    await hookAsOwner.write.queuePrizeTemplate([validTemplate]);
+
+    await runFullDrawCycle(fixture);
 
     // The only participant in draw 0 was `trader`, so they must have won.
     const traderShipIds = await ships.read.getShipIdsOwned([
@@ -323,35 +344,49 @@ describe("UTCLotteryHook — real swap integration", function () {
     expect(prizeShip.traits.accuracy).to.equal(2);
     expect(prizeShip.traits.hull).to.equal(2);
     expect(prizeShip.traits.speed).to.equal(2);
+    expect(await hookAsOwner.read.queueLength()).to.equal(0n);
   });
 
-  describe("setPrizeTemplate validation", function () {
-    const validTemplate = {
-      variant: 1,
-      colors: {
-        h1: 45,
-        s1: 100,
-        l1: 50,
-        h2: 45,
-        s2: 100,
-        l2: 50,
-        h3: 45,
-        s3: 100,
-        l3: 50,
-      },
-      accuracy: 2,
-      hull: 2,
-      speed: 2,
-      mainWeapon: 0, // MainWeapon.Generic
-      armor: 3, // Armor.Heavy
-      shields: 0, // Shields.None
-      special: 0, // Special.None
-    };
+  it("falls back to a random 4-star ship when the queue is empty", async function () {
+    const fixture = await loadFixture(deployFixture);
+    const { ships, trader } = fixture;
+    await setUpPoolAndLiquidity(fixture);
+    // Queue deliberately left empty.
+
+    await runFullDrawCycle(fixture);
+
+    const traderShipIds = await ships.read.getShipIdsOwned([
+      trader.account.address,
+    ]);
+    expect(traderShipIds.length).to.equal(1);
+
+    // createShips(winner, 1, fallbackVariant, 4, false) gives the single
+    // minted ship rank 5 (Ships._getKillsForRank(5) == 300), the same top
+    // rank a real tier-4 pack's first ship gets — and it's NOT hand-crafted,
+    // so it's still unconstructed (no name/stats revealed yet).
+    const prizeShip = await ships.read.getShip([traderShipIds[0]]);
+    expect(prizeShip.shipData.shipsDestroyed).to.equal(300);
+    expect(prizeShip.shipData.constructed).to.equal(false);
+    expect(prizeShip.name).to.equal("");
+  });
+
+  describe("prize queue", function () {
+    it("only the owner can queue a template", async function () {
+      const { hook, trader } = await loadFixture(deployFixture);
+      const asTrader = await hre.viem.getContractAt(
+        "UTCLotteryHook",
+        hook.address,
+        { client: { wallet: trader } },
+      );
+      await expect(
+        asTrader.write.queuePrizeTemplate([validTemplate]),
+      ).to.be.rejectedWith("OwnableUnauthorizedAccount");
+    });
 
     it("reverts InvalidPrizeVariant for variant 0", async function () {
       const { hookAsOwner } = await loadFixture(deployFixture);
       await expect(
-        hookAsOwner.write.setPrizeTemplate([
+        hookAsOwner.write.queuePrizeTemplate([
           { ...validTemplate, variant: 0 },
         ]),
       ).to.be.rejectedWith("InvalidPrizeVariant");
@@ -361,7 +396,7 @@ describe("UTCLotteryHook — real swap integration", function () {
       const { hookAsOwner, ships } = await loadFixture(deployFixture);
       const maxVariant = await ships.read.maxVariant();
       await expect(
-        hookAsOwner.write.setPrizeTemplate([
+        hookAsOwner.write.queuePrizeTemplate([
           { ...validTemplate, variant: maxVariant + 1 },
         ]),
       ).to.be.rejectedWith("InvalidPrizeVariant");
@@ -370,7 +405,7 @@ describe("UTCLotteryHook — real swap integration", function () {
     it("reverts ArmorAndShieldsBothSet when both are non-None", async function () {
       const { hookAsOwner } = await loadFixture(deployFixture);
       await expect(
-        hookAsOwner.write.setPrizeTemplate([
+        hookAsOwner.write.queuePrizeTemplate([
           { ...validTemplate, armor: 3, shields: 1 },
         ]),
       ).to.be.rejectedWith("ArmorAndShieldsBothSet");
@@ -379,22 +414,68 @@ describe("UTCLotteryHook — real swap integration", function () {
     it("reverts InvalidPrizeStatTier when a stat exceeds tier 2", async function () {
       const { hookAsOwner } = await loadFixture(deployFixture);
       await expect(
-        hookAsOwner.write.setPrizeTemplate([
+        hookAsOwner.write.queuePrizeTemplate([
           { ...validTemplate, accuracy: 3 },
         ]),
       ).to.be.rejectedWith("InvalidPrizeStatTier");
     });
 
-    it("accepts a valid template", async function () {
-      const { hookAsOwner, hook } = await loadFixture(deployFixture);
-      await hookAsOwner.write.setPrizeTemplate([
+    it("accepts a valid template and increments queueLength", async function () {
+      const { hookAsOwner } = await loadFixture(deployFixture);
+      await hookAsOwner.write.queuePrizeTemplate([
         { ...validTemplate, hull: 1 },
       ]);
-      // Solidity's auto-generated getter for a struct returns a positional
-      // tuple, not named fields: [variant, colors, accuracy, hull, speed,
-      // mainWeapon, armor, shields, special].
-      const stored = await hook.read.prizeTemplate();
-      expect(stored[3]).to.equal(1);
+      expect(await hookAsOwner.read.queueLength()).to.equal(1n);
+    });
+
+    it("allows up to MAX_QUEUE_SIZE (5) templates, then reverts PrizeQueueFull", async function () {
+      const { hookAsOwner } = await loadFixture(deployFixture);
+      for (let i = 0; i < 5; i++) {
+        await hookAsOwner.write.queuePrizeTemplate([validTemplate]);
+      }
+      expect(await hookAsOwner.read.queueLength()).to.equal(5n);
+      await expect(
+        hookAsOwner.write.queuePrizeTemplate([validTemplate]),
+      ).to.be.rejectedWith("PrizeQueueFull");
+    });
+
+    it("clearPrizeQueue empties the queue and is owner-only", async function () {
+      const { hookAsOwner, hook, trader } = await loadFixture(deployFixture);
+      await hookAsOwner.write.queuePrizeTemplate([validTemplate]);
+      await hookAsOwner.write.queuePrizeTemplate([validTemplate]);
+      expect(await hook.read.queueLength()).to.equal(2n);
+
+      const asTrader = await hre.viem.getContractAt(
+        "UTCLotteryHook",
+        hook.address,
+        { client: { wallet: trader } },
+      );
+      await expect(
+        asTrader.write.clearPrizeQueue(),
+      ).to.be.rejectedWith("OwnableUnauthorizedAccount");
+
+      await hookAsOwner.write.clearPrizeQueue();
+      expect(await hook.read.queueLength()).to.equal(0n);
+    });
+
+    it("dequeues in FIFO order across multiple resolved draws", async function () {
+      const fixture = await loadFixture(deployFixture);
+      const { hookAsOwner, ships, trader } = fixture;
+      await setUpPoolAndLiquidity(fixture);
+      await hookAsOwner.write.queuePrizeTemplate([
+        { ...validTemplate, hull: 0 },
+      ]);
+      await hookAsOwner.write.queuePrizeTemplate([
+        { ...validTemplate, hull: 1 },
+      ]);
+
+      await runFullDrawCycle(fixture);
+      expect(await hookAsOwner.read.queueLength()).to.equal(1n);
+      const traderShipIds = await ships.read.getShipIdsOwned([
+        trader.account.address,
+      ]);
+      const firstPrize = await ships.read.getShip([traderShipIds[0]]);
+      expect(firstPrize.traits.hull).to.equal(0); // first-queued template
     });
   });
 });

@@ -78,18 +78,27 @@ contract UTCLotteryHook is BaseHook, Ownable {
     mapping(uint256 => uint256) public drawRandomRequestId;
     mapping(uint256 => bool) public drawResolved;
 
-    // "1-of-a-kind" resolved: each resolved draw hand-crafts its winner's
-    // ship via Ships.createSpecificShip (not the generic random-rolled
-    // createShips every other mint path uses), so the prize is a genuinely
-    // distinct template, not just a random ship sharing a common
-    // variant/tier with ones sold elsewhere. Provenance/distinctiveness
-    // across repeated draws comes from the name, which embeds the draw id
-    // ("Legendary Draw #N") — see _buildPrizeShip. The stat/equipment
-    // template itself is owner-configurable (setPrizeTemplate) rather than
-    // hardcoded, since exact loadout/flavor is a game-design call this
-    // contract shouldn't make unilaterally; the constructor seeds a
-    // reasonable top-tier default (max accuracy/hull/speed) so the contract
-    // is usable before that call is ever made.
+    // "1-of-a-kind" resolved: the owner can queue up to MAX_QUEUE_SIZE
+    // hand-crafted ship templates (queuePrizeTemplate); each resolved draw
+    // dequeues the oldest one (FIFO) and mints it via Ships.createSpecificShip
+    // (not the generic random-rolled createShips every other mint path
+    // uses), so a queued prize is a genuinely distinct template, not just a
+    // random ship sharing a common variant/tier with ones sold elsewhere.
+    // Provenance/distinctiveness across repeated draws also comes from the
+    // name, which embeds the draw id ("Legendary Draw #N") — see
+    // _buildPrizeShip.
+    //
+    // If the queue is empty when a draw resolves, the prize falls back to a
+    // single random "4-star" ship instead — concretely, Ships.createShips's
+    // own existing tier-based rank logic: calling createShips(winner, 1,
+    // fallbackVariant, 4, false) gives amount=1 the tier-4 rank count's
+    // *first* (i==0) slot, which is rank 5 — the same top rank the first
+    // ship in a real tier-4 pack purchase gets via _getKillsForRank — using
+    // the ordinary random-generation path (constructShip still reveals its
+    // actual stats later, same as any other purchased ship), not a
+    // hand-crafted template. No new generation logic needed — this reuses
+    // Ships.sol's existing, already-authorized rank mechanism exactly as
+    // purchaseWithFlow does for a tier-4 pack's best slot.
     struct PrizeTemplate {
         uint16 variant;
         Colors colors;
@@ -102,7 +111,15 @@ contract UTCLotteryHook is BaseHook, Ownable {
         Special special;
     }
 
-    PrizeTemplate public prizeTemplate;
+    uint256 public constant MAX_QUEUE_SIZE = 5;
+    mapping(uint256 => PrizeTemplate) public prizeQueue;
+    uint256 public queueHead;
+    uint256 public queueTail;
+
+    // Variant used only for the random-4-star fallback path (createShips
+    // still requires one). Owner-configurable, defaults to 1 (present in
+    // every fixture/deploy this repo uses).
+    uint16 public fallbackVariant = 1;
 
     event SellRecorded(
         uint256 indexed drawId,
@@ -112,6 +129,8 @@ contract UTCLotteryHook is BaseHook, Ownable {
     );
     event DrawStarted(uint256 indexed drawId, uint256 requestId, uint256 totalWeight);
     event DrawResolved(uint256 indexed drawId, address indexed winner);
+    event PrizeQueued(uint256 indexed queueIndex);
+    event PrizeQueueCleared();
 
     error NotOurPool();
     error PoolAlreadyLocked();
@@ -121,6 +140,7 @@ contract UTCLotteryHook is BaseHook, Ownable {
     error InvalidPrizeVariant(uint16 variant);
     error ArmorAndShieldsBothSet();
     error InvalidPrizeStatTier();
+    error PrizeQueueFull();
 
     constructor(
         IPoolManager _poolManager,
@@ -133,38 +153,9 @@ contract UTCLotteryHook is BaseHook, Ownable {
         randomManager = IRandomManager(_randomManager);
         utcToken = _utcToken;
         lastDrawTime = block.timestamp;
-
-        // Reasonable top-tier default so the contract is usable before
-        // setPrizeTemplate is ever called — max stat tier (2, per
-        // GenerateNewShip.getTierOfTrait) on all three, variant 1 (present
-        // in every fixture/deploy this repo uses), no armor/shields/special
-        // preference implied. Owner should still call setPrizeTemplate with
-        // real flavor/equipment before this ever goes live.
-        prizeTemplate = PrizeTemplate({
-            variant: 1,
-            colors: Colors({
-                h1: 45,
-                s1: 100,
-                l1: 50,
-                h2: 45,
-                s2: 100,
-                l2: 50,
-                h3: 45,
-                s3: 100,
-                l3: 50
-            }),
-            accuracy: 2,
-            hull: 2,
-            speed: 2,
-            mainWeapon: MainWeapon.Generic,
-            armor: Armor.Heavy,
-            // A ship can only have one of armor/shields, never both — see
-            // DroneYard.sol's ArmorAndShieldsBothSet check, which this
-            // contract's own setPrizeTemplate re-validates since
-            // Ships.createSpecificShip doesn't enforce it itself.
-            shields: Shields.None,
-            special: Special.None
-        });
+        // Queue starts empty — no seeded default template. An empty queue
+        // is a fully-defined, intentional state (the random-4-star
+        // fallback), not something that needs a placeholder to avoid.
     }
 
     function getHookPermissions()
@@ -332,21 +323,30 @@ contract UTCLotteryHook is BaseHook, Ownable {
         }
 
         drawResolved[_drawId] = true;
-        ships.createSpecificShip(winner, _buildPrizeShip(_drawId));
+
+        if (queueTail > queueHead) {
+            PrizeTemplate memory t = prizeQueue[queueHead];
+            delete prizeQueue[queueHead];
+            queueHead++;
+            ships.createSpecificShip(winner, _buildPrizeShip(_drawId, t));
+        } else {
+            // Random 4-star fallback — see the PrizeTemplate comment above
+            // for exactly why tier 4 + amount 1 produces this.
+            ships.createShips(winner, 1, fallbackVariant, 4, false);
+        }
 
         emit DrawResolved(_drawId, winner);
     }
 
-    // Hand-crafts this draw's prize from the owner-configured template,
-    // rather than going through the generic random-rolled createShips path
-    // every other mint route in this repo uses — see the PrizeTemplate
-    // comment above for why. The name embeds the draw id so winners across
-    // different draws are provably distinct from each other, not just from
-    // ordinary ships.
+    // Hand-crafts this draw's prize from a dequeued template, rather than
+    // going through the generic random-rolled createShips path every other
+    // mint route in this repo uses — see the PrizeTemplate comment above for
+    // why. The name embeds the draw id so winners across different draws
+    // are provably distinct from each other, not just from ordinary ships.
     function _buildPrizeShip(
-        uint256 _drawId
-    ) internal view returns (Ship memory) {
-        PrizeTemplate memory t = prizeTemplate;
+        uint256 _drawId,
+        PrizeTemplate memory t
+    ) internal pure returns (Ship memory) {
         return
             Ship({
                 name: string.concat(
@@ -391,19 +391,40 @@ contract UTCLotteryHook is BaseHook, Ownable {
         minEntryThresholdWei = _minEntryThresholdWei;
     }
 
-    function setPrizeTemplate(
+    // Appends one hand-crafted template to the back of the queue (FIFO —
+    // see the PrizeTemplate comment above). Reverts PrizeQueueFull once
+    // MAX_QUEUE_SIZE (5) templates are already queued; call clearPrizeQueue
+    // or wait for draws to consume entries first.
+    function queuePrizeTemplate(
         PrizeTemplate calldata _template
     ) external onlyOwner {
-        if (_template.variant == 0 || _template.variant > ships.maxVariant()) {
-            revert InvalidPrizeVariant(_template.variant);
+        if (queueTail - queueHead >= MAX_QUEUE_SIZE) {
+            revert PrizeQueueFull();
         }
-        if (_template.armor != Armor.None && _template.shields != Shields.None) {
-            revert ArmorAndShieldsBothSet();
+        _validatePrizeTemplate(_template);
+        prizeQueue[queueTail] = _template;
+        emit PrizeQueued(queueTail);
+        queueTail++;
+    }
+
+    // O(1): just advances the head past every currently-queued entry,
+    // rather than deleting each one individually — stale mapping data left
+    // behind is harmless since resolveDraw only ever reads at-or-after
+    // queueHead.
+    function clearPrizeQueue() external onlyOwner {
+        queueHead = queueTail;
+        emit PrizeQueueCleared();
+    }
+
+    function queueLength() external view returns (uint256) {
+        return queueTail - queueHead;
+    }
+
+    function setFallbackVariant(uint16 _variant) external onlyOwner {
+        if (_variant == 0 || _variant > ships.maxVariant()) {
+            revert InvalidPrizeVariant(_variant);
         }
-        if (_template.accuracy > 2 || _template.hull > 2 || _template.speed > 2) {
-            revert InvalidPrizeStatTier();
-        }
-        prizeTemplate = _template;
+        fallbackVariant = _variant;
     }
 
     function setShips(address _ships) external onlyOwner {
@@ -412,5 +433,25 @@ contract UTCLotteryHook is BaseHook, Ownable {
 
     function setRandomManager(address _randomManager) external onlyOwner {
         randomManager = IRandomManager(_randomManager);
+    }
+
+    // Validates what Ships.createSpecificShip doesn't itself enforce — see
+    // the inline comments on each check.
+    function _validatePrizeTemplate(
+        PrizeTemplate calldata _template
+    ) internal view {
+        if (_template.variant == 0 || _template.variant > ships.maxVariant()) {
+            revert InvalidPrizeVariant(_template.variant);
+        }
+        // A ship can only have one of armor/shields, never both — see
+        // DroneYard.sol's ArmorAndShieldsBothSet check, which this
+        // contract re-validates since Ships.createSpecificShip doesn't
+        // enforce it itself.
+        if (_template.armor != Armor.None && _template.shields != Shields.None) {
+            revert ArmorAndShieldsBothSet();
+        }
+        if (_template.accuracy > 2 || _template.hull > 2 || _template.speed > 2) {
+            revert InvalidPrizeStatTier();
+        }
     }
 }
