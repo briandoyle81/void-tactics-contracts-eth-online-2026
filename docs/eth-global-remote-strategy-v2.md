@@ -112,20 +112,50 @@ dashboard against live Base Sepolia data.
 
 $3,500 pool, up to 3 teams at $1,166 each. Not Continuity-restricted.
 
-**Build:** gate `FreeShipClaim.claimFreeShips` and `TutorialClaim.completeTutorialWinPath`/
-`completeTutorialLossPath` behind a Selfie Check proof, reusing the World ID pattern
-`Tournament.sol` already established (`ByteHasher` signal hashing, a nullifier mapping, on-chain
-proof validation — not a backend check).
+**Architecture corrected from the original plan, and built.** Selfie Check has **no on-chain
+verification path** — confirmed directly against World's own docs (`docs.world.org`, checked
+three separate pages): verification is an off-chain REST call to World's verify endpoint, unlike
+Orb-level World ID, which `Tournament.sol` already correctly uses on-chain via `IWorldID`
+(`groupId = 1`, "Orb-verified, on-chain only" per `IWorldID.sol`'s own doc comment). So "reuse
+`Tournament.sol`'s `ByteHasher`/nullifier/on-chain-proof pattern," the original plan for this
+pick, isn't executable — there's no proof for a contract to verify. Rebuilt around the pattern
+already used elsewhere in this project for exactly this shape of problem (the frontend repo's
+Fireblocks Flow fulfillment: a backend verifies something off-chain, then an authorized backend
+address relays the result on-chain):
 
-- `FreeShipClaim.sol` currently tracks only `lastClaimTimestamp[msg.sender]` — add a
-  per-nullifier claim record alongside it (don't remove the existing per-address cooldown), so a
-  proof can't be reused across wallets.
-- `TutorialClaim.sol` currently tracks only `tutorialCompleted[player]` — same
-  nullifier-alongside-address addition.
-- Both are already standalone contracts (per this repo's size-fix pattern), so this doesn't
-  pressure `Ships.sol`/`Game.sol`'s size budget at all.
+- **`contracts/IEligibilityProvider.sol`** — a new interface, same swappable-provider shape as
+  `Ships.sol`/`Tournament.sol`'s existing `IRandomManager`: the consuming contract doesn't know or
+  care *how* eligibility is established, only whether `isEligible(player)` says yes.
+- **`contracts/SelfieCheckEligibilityProvider.sol`** — the real implementation. A backend
+  (holding an address on its own `authorizedVerifiers` allowlist — same authorized-caller shape as
+  `Ships.isAllowedToCreateShips`) calls `markVerified(player, nullifierHash)` after confirming a
+  Selfie Check pass against World's off-chain API; `verifiedUntil[player]` is then set to `now +
+  90 days`, matching Selfie Check's own real validity window (confirmed via World's docs: "Selfie
+  Check has a 90-day inactivity window"). Nullifier reuse is blocked (with an owner kill switch,
+  `nullifierCheckEnabled`, for just that check) so the same verified human can't back multiple
+  wallets.
+- **`contracts/MockAlwaysEligible.sol`** — local/test stand-in wired by `DeployAndConfig.ts` for
+  non-production deploys, mirroring the existing `shipNames`/`MockOnchainRandomShipNames` pattern.
+  One shared instance serves both consumers below (it's stateless).
+- **`FreeShipClaim.sol` and `TutorialClaim.sol` both gated, built and tested.** Each got an
+  `eligibilityProvider` field + owner-only `setEligibilityProvider`; unset (`address(0)`, the
+  default) means claiming/completing stays fully open — today's behavior exactly, no gating until
+  the owner deliberately wires a real provider. `TutorialClaim.sol` needed `Ownable` added first —
+  it previously had no admin surface at all. The check sits in `FreeShipClaim.claimFreeShips`
+  directly, and in `TutorialClaim._markTutorialCompleted` (the shared internal helper both
+  `completeTutorialWinPath`/`completeTutorialLossPath` call), so one check point covers both
+  entry points. 9 dedicated tests across the two contracts (default-permissive, owner-only
+  setter, blocked-when-unverified, succeeds-once-verified). Sizes: `FreeShipClaim` 1.631 → 1.959
+  KiB, `TutorialClaim` 3.088 → 3.834 KiB deployed — no pressure on either.
+- **Known, deliberate gap** (tracked in `docs/pre-audit.md`, addendum SC-01): the old,
+  fully-unrestricted `claimFreeShips`/`completeTutorialWinPath`/`completeTutorialLossPath` paths
+  are left callable as-is — the new eligibility check is additive, not yet enforced as the *only*
+  path. Whether/how to restrict the old paths once a real provider is live is a separate,
+  not-yet-made decision — doing so would need rework of the existing test suite (`Ships.test.ts`
+  calls `claimFreeShips` directly in many places) and makes claiming hard-dependent on backend
+  availability for the first time.
 - Deliverable also requires a feedback document (World ID docs, Developer Portal, Sandbox App
-  experience) — write it alongside the code, not after.
+  experience) — not yet written.
 
 ---
 

@@ -1,6 +1,7 @@
 import { expect } from "chai";
 import { loadFixture } from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
 import hre from "hardhat";
+import { keccak256, toBytes } from "viem";
 import DeployModule from "../ignition/modules/DeployAndConfig";
 
 describe("TutorialClaim", function () {
@@ -283,5 +284,97 @@ describe("TutorialClaim", function () {
     await expect(
       user1Ships.write.createSpecificShip([user1.account.address, template]),
     ).to.be.rejectedWith("NotAuthorized");
+  });
+
+  describe("eligibilityProvider", function () {
+    it("deploy module wires a permissive MockAlwaysEligible by default, so completing stays open", async function () {
+      const { tutorialClaim } = await loadFixture(deployTutorialFixture);
+
+      const providerAddress = await tutorialClaim.read.eligibilityProvider();
+      expect(providerAddress).to.not.equal(
+        "0x0000000000000000000000000000000000000000",
+      );
+      const provider = await hre.viem.getContractAt(
+        "MockAlwaysEligible",
+        providerAddress,
+      );
+      expect(await provider.read.isEligible([providerAddress])).to.equal(
+        true,
+      );
+    });
+
+    it("only the owner can set eligibilityProvider", async function () {
+      const { user1TutorialClaim } = await loadFixture(deployTutorialFixture);
+      await expect(
+        user1TutorialClaim.write.setEligibilityProvider([
+          "0x0000000000000000000000000000000000000001",
+        ]),
+      ).to.be.rejectedWith("OwnableUnauthorizedAccount");
+    });
+
+    it("reverts NotEligible once a provider is wired and the player hasn't been verified", async function () {
+      const { tutorialClaim, user1TutorialClaim, user1 } =
+        await loadFixture(deployTutorialFixture);
+      const owner = await tutorialClaim.read.owner();
+      const ownerClient = (await hre.viem.getWalletClients()).find(
+        (c) => c.account.address.toLowerCase() === owner.toLowerCase(),
+      )!;
+      const tutorialClaimAsOwner = await hre.viem.getContractAt(
+        "TutorialClaim",
+        tutorialClaim.address,
+        { client: { wallet: ownerClient } },
+      );
+
+      const provider = await hre.viem.deployContract(
+        "SelfieCheckEligibilityProvider",
+        [ownerClient.account.address],
+      );
+      await tutorialClaimAsOwner.write.setEligibilityProvider([
+        provider.address,
+      ]);
+
+      await expect(
+        user1TutorialClaim.write.completeTutorialWinPath(),
+      ).to.be.rejectedWith("NotEligible");
+      expect(await tutorialClaim.read.tutorialCompleted([
+        user1.account.address,
+      ])).to.equal(false);
+    });
+
+    it("succeeds once the wired provider marks the player verified", async function () {
+      const { tutorialClaim, user1TutorialClaim, user1 } =
+        await loadFixture(deployTutorialFixture);
+      const owner = await tutorialClaim.read.owner();
+      const ownerClient = (await hre.viem.getWalletClients()).find(
+        (c) => c.account.address.toLowerCase() === owner.toLowerCase(),
+      )!;
+      const tutorialClaimAsOwner = await hre.viem.getContractAt(
+        "TutorialClaim",
+        tutorialClaim.address,
+        { client: { wallet: ownerClient } },
+      );
+
+      const provider = await hre.viem.deployContract(
+        "SelfieCheckEligibilityProvider",
+        [ownerClient.account.address],
+      );
+      await tutorialClaimAsOwner.write.setEligibilityProvider([
+        provider.address,
+      ]);
+      await provider.write.setAuthorizedVerifier(
+        [ownerClient.account.address, true],
+        { account: ownerClient.account },
+      );
+      const nullifierHash = keccak256(toBytes("tutorial-test-nullifier"));
+      await provider.write.markVerified(
+        [user1.account.address, nullifierHash],
+        { account: ownerClient.account },
+      );
+
+      await user1TutorialClaim.write.completeTutorialWinPath();
+      expect(await tutorialClaim.read.tutorialCompleted([
+        user1.account.address,
+      ])).to.equal(true);
+    });
   });
 });

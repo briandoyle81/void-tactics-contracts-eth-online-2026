@@ -1,31 +1,54 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
+import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./ITutorialShips.sol";
 import "./ITutorialGameResults.sol";
+import "./IEligibilityProvider.sol";
 import "./Types.sol";
 
-contract TutorialClaim is ReentrancyGuard {
+contract TutorialClaim is Ownable, ReentrancyGuard {
     error TutorialAlreadyCompleted();
     error ZeroAddress();
+    error NotEligible(address player);
 
     mapping(address => bool) public tutorialCompleted;
 
     ITutorialShips public immutable ships;
     ITutorialGameResults public immutable gameResults;
 
+    // Same swappable-provider shape as FreeShipClaim.sol/Ships.sol's
+    // IRandomManager: this contract doesn't know or care how eligibility is
+    // established, only whether IEligibilityProvider says yes. Unset
+    // (address(0), the default) means completing the tutorial stays fully
+    // open — matches today's behavior exactly, no gating until the owner
+    // deliberately wires a real provider (e.g. SelfieCheckEligibilityProvider.sol)
+    // in. See docs/pre-audit.md's SC-01 addendum.
+    IEligibilityProvider public eligibilityProvider;
+
     event TutorialCompleted(
         address indexed player,
         bool winPath,
         uint8 shipsCreated
     );
+    event EligibilityProviderSet(address indexed provider);
 
-    constructor(address _ships, address _gameResults) {
+    constructor(
+        address _ships,
+        address _gameResults
+    ) Ownable(msg.sender) {
         if (_ships == address(0) || _gameResults == address(0))
             revert ZeroAddress();
         ships = ITutorialShips(_ships);
         gameResults = ITutorialGameResults(_gameResults);
+    }
+
+    function setEligibilityProvider(
+        address _eligibilityProvider
+    ) external onlyOwner {
+        eligibilityProvider = IEligibilityProvider(_eligibilityProvider);
+        emit EligibilityProviderSet(_eligibilityProvider);
     }
 
     function completeTutorialWinPath() external nonReentrant {
@@ -52,6 +75,11 @@ contract TutorialClaim is ReentrancyGuard {
     }
 
     function _markTutorialCompleted(address player) internal {
+        if (address(eligibilityProvider) != address(0)) {
+            if (!eligibilityProvider.isEligible(player)) {
+                revert NotEligible(player);
+            }
+        }
         if (tutorialCompleted[player]) revert TutorialAlreadyCompleted();
         tutorialCompleted[player] = true;
     }

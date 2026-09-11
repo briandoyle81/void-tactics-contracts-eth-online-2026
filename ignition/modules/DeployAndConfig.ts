@@ -1731,19 +1731,28 @@ const DeployModule = buildModule("DeployModule", (m) => {
 
   // eligibilityProvider mirrors the shipNames mock-vs-real split: local/test
   // deploys wire a mock that's always permissive, keeping
-  // FreeShipClaim.claimFreeShips's provider-wired code path exercised by the
-  // shared fixture without depending on the real Selfie Check backend-relay
-  // infrastructure (which has no on-chain verification path of its own —
-  // see SelfieCheckEligibilityProvider.sol). Production leaves this unset
-  // for now (fully open, today's behavior) — the real
+  // FreeShipClaim.claimFreeShips's/TutorialClaim's provider-wired code path
+  // exercised by the shared fixture without depending on the real Selfie
+  // Check backend-relay infrastructure (which has no on-chain verification
+  // path of its own — see SelfieCheckEligibilityProvider.sol). Production
+  // leaves this unset for now (fully open, today's behavior) — the real
   // SelfieCheckEligibilityProvider isn't deployed/wired yet; revisit once
-  // Selfie Check gating is actually ready to go live.
+  // Selfie Check gating is actually ready to go live. One mock instance is
+  // shared by both consumers — it's stateless (always returns true), so
+  // there's nothing gained by deploying two.
   let eligibilityProvider: any;
   if (!PRODUCTION) {
     eligibilityProvider = m.contract("MockAlwaysEligible");
   }
   const setFreeShipClaimEligibilityProviderCall = eligibilityProvider
-    ? m.call(freeShipClaim, "setEligibilityProvider", [eligibilityProvider])
+    ? m.call(freeShipClaim, "setEligibilityProvider", [eligibilityProvider], {
+        id: "SetFreeShipClaimEligibilityProvider",
+      })
+    : undefined;
+  const setTutorialClaimEligibilityProviderCall = eligibilityProvider
+    ? m.call(tutorialClaim, "setEligibilityProvider", [eligibilityProvider], {
+        id: "SetTutorialClaimEligibilityProvider",
+      })
     : undefined;
 
   // FreeShipClaim mints through Ships' existing authorized-minter allowlist,
