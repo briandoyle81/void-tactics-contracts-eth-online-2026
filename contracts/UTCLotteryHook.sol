@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
 import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -13,6 +14,7 @@ import {BeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import "./IShips.sol";
 import "./IRandomManager.sol";
+import "./Types.sol";
 
 // UTCLotteryHook — the pool + lottery half of the Uniswap pick
 // (docs/eth-global-remote-strategy-v2.md, Pick 3). No fee-to-treasury, no
@@ -76,15 +78,31 @@ contract UTCLotteryHook is BaseHook, Ownable {
     mapping(uint256 => uint256) public drawRandomRequestId;
     mapping(uint256 => bool) public drawResolved;
 
-    // NOTE — open question, not resolved by this contract: what "1-of-a-kind"
-    // means across repeated draws (a fresh unique variant minted per draw,
-    // vs. one eternal prize) is still undecided per the strategy doc. This
-    // mints one ship per resolved draw using prizeVariant/prizeTier below;
-    // it does not itself guarantee the minted ship is visually or
-    // mechanically unique — that's a separate decision for whoever sets
-    // prizeVariant, deliberately left configurable rather than assumed here.
-    uint16 public prizeVariant;
-    uint8 public prizeTier;
+    // "1-of-a-kind" resolved: each resolved draw hand-crafts its winner's
+    // ship via Ships.createSpecificShip (not the generic random-rolled
+    // createShips every other mint path uses), so the prize is a genuinely
+    // distinct template, not just a random ship sharing a common
+    // variant/tier with ones sold elsewhere. Provenance/distinctiveness
+    // across repeated draws comes from the name, which embeds the draw id
+    // ("Legendary Draw #N") — see _buildPrizeShip. The stat/equipment
+    // template itself is owner-configurable (setPrizeTemplate) rather than
+    // hardcoded, since exact loadout/flavor is a game-design call this
+    // contract shouldn't make unilaterally; the constructor seeds a
+    // reasonable top-tier default (max accuracy/hull/speed) so the contract
+    // is usable before that call is ever made.
+    struct PrizeTemplate {
+        uint16 variant;
+        Colors colors;
+        uint8 accuracy;
+        uint8 hull;
+        uint8 speed;
+        MainWeapon mainWeapon;
+        Armor armor;
+        Shields shields;
+        Special special;
+    }
+
+    PrizeTemplate public prizeTemplate;
 
     event SellRecorded(
         uint256 indexed drawId,
@@ -100,6 +118,9 @@ contract UTCLotteryHook is BaseHook, Ownable {
     error DrawAlreadyResolved(uint256 drawId);
     error DrawNotStarted(uint256 drawId);
     error NoParticipants(uint256 drawId);
+    error InvalidPrizeVariant(uint16 variant);
+    error ArmorAndShieldsBothSet();
+    error InvalidPrizeStatTier();
 
     constructor(
         IPoolManager _poolManager,
@@ -112,6 +133,38 @@ contract UTCLotteryHook is BaseHook, Ownable {
         randomManager = IRandomManager(_randomManager);
         utcToken = _utcToken;
         lastDrawTime = block.timestamp;
+
+        // Reasonable top-tier default so the contract is usable before
+        // setPrizeTemplate is ever called — max stat tier (2, per
+        // GenerateNewShip.getTierOfTrait) on all three, variant 1 (present
+        // in every fixture/deploy this repo uses), no armor/shields/special
+        // preference implied. Owner should still call setPrizeTemplate with
+        // real flavor/equipment before this ever goes live.
+        prizeTemplate = PrizeTemplate({
+            variant: 1,
+            colors: Colors({
+                h1: 45,
+                s1: 100,
+                l1: 50,
+                h2: 45,
+                s2: 100,
+                l2: 50,
+                h3: 45,
+                s3: 100,
+                l3: 50
+            }),
+            accuracy: 2,
+            hull: 2,
+            speed: 2,
+            mainWeapon: MainWeapon.Generic,
+            armor: Armor.Heavy,
+            // A ship can only have one of armor/shields, never both — see
+            // DroneYard.sol's ArmorAndShieldsBothSet check, which this
+            // contract's own setPrizeTemplate re-validates since
+            // Ships.createSpecificShip doesn't enforce it itself.
+            shields: Shields.None,
+            special: Special.None
+        });
     }
 
     function getHookPermissions()
@@ -279,9 +332,55 @@ contract UTCLotteryHook is BaseHook, Ownable {
         }
 
         drawResolved[_drawId] = true;
-        ships.createShips(winner, 1, prizeVariant, prizeTier, false);
+        ships.createSpecificShip(winner, _buildPrizeShip(_drawId));
 
         emit DrawResolved(_drawId, winner);
+    }
+
+    // Hand-crafts this draw's prize from the owner-configured template,
+    // rather than going through the generic random-rolled createShips path
+    // every other mint route in this repo uses — see the PrizeTemplate
+    // comment above for why. The name embeds the draw id so winners across
+    // different draws are provably distinct from each other, not just from
+    // ordinary ships.
+    function _buildPrizeShip(
+        uint256 _drawId
+    ) internal view returns (Ship memory) {
+        PrizeTemplate memory t = prizeTemplate;
+        return
+            Ship({
+                name: string.concat(
+                    "Legendary Draw #",
+                    Strings.toString(_drawId)
+                ),
+                id: 0, // ignored by createSpecificShip — real id assigned internally
+                equipment: Equipment({
+                    mainWeapon: t.mainWeapon,
+                    armor: t.armor,
+                    shields: t.shields,
+                    special: t.special
+                }),
+                traits: Traits({
+                    serialNumber: 0, // ignored by createSpecificShip/_applyShipCustomization
+                    colors: t.colors,
+                    variant: t.variant,
+                    accuracy: t.accuracy,
+                    hull: t.hull,
+                    speed: t.speed
+                }),
+                shipData: ShipData({
+                    shipsDestroyed: 0,
+                    costsVersion: 0, // recomputed internally via _setCostOfShip
+                    cost: 0, // recomputed internally via _setCostOfShip
+                    modified: 0, // recomputed internally via _calculateModifications
+                    shiny: true, // the whole point is that it's not an ordinary ship
+                    constructed: false, // set true internally by _applyShipCustomization
+                    inFleet: false,
+                    isFreeShip: false,
+                    timestampDestroyed: 0
+                }),
+                owner: address(0) // ignored — real owner is createSpecificShip's `_to` param
+            });
     }
 
     /**
@@ -292,9 +391,19 @@ contract UTCLotteryHook is BaseHook, Ownable {
         minEntryThresholdWei = _minEntryThresholdWei;
     }
 
-    function setPrize(uint16 _variant, uint8 _tier) external onlyOwner {
-        prizeVariant = _variant;
-        prizeTier = _tier;
+    function setPrizeTemplate(
+        PrizeTemplate calldata _template
+    ) external onlyOwner {
+        if (_template.variant == 0 || _template.variant > ships.maxVariant()) {
+            revert InvalidPrizeVariant(_template.variant);
+        }
+        if (_template.armor != Armor.None && _template.shields != Shields.None) {
+            revert ArmorAndShieldsBothSet();
+        }
+        if (_template.accuracy > 2 || _template.hull > 2 || _template.speed > 2) {
+            revert InvalidPrizeStatTier();
+        }
+        prizeTemplate = _template;
     }
 
     function setShips(address _ships) external onlyOwner {

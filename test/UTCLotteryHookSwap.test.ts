@@ -247,7 +247,6 @@ describe("UTCLotteryHook — real swap integration", function () {
       swapRouter,
       key,
       hook,
-      hookAsOwner,
       ships,
       lp,
       trader,
@@ -268,7 +267,8 @@ describe("UTCLotteryHook — real swap integration", function () {
       { account: lp.account, value: parseEther("5") },
     );
 
-    await hookAsOwner.write.setPrize([1, 0]);
+    // Constructor already seeds a valid default prizeTemplate — no setup
+    // call needed for this test.
 
     const hookData = encodeAbiParameters(
       [{ type: "address" }],
@@ -314,5 +314,87 @@ describe("UTCLotteryHook — real swap integration", function () {
       trader.account.address,
     ]);
     expect(traderShipIds.length).to.equal(1);
+
+    // Hand-crafted via createSpecificShip, not the generic random path —
+    // confirms _buildPrizeShip actually ran, not just that some ship exists.
+    const prizeShip = await ships.read.getShip([traderShipIds[0]]);
+    expect(prizeShip.name).to.equal("Legendary Draw #0");
+    expect(prizeShip.shipData.shiny).to.equal(true);
+    expect(prizeShip.traits.accuracy).to.equal(2);
+    expect(prizeShip.traits.hull).to.equal(2);
+    expect(prizeShip.traits.speed).to.equal(2);
+  });
+
+  describe("setPrizeTemplate validation", function () {
+    const validTemplate = {
+      variant: 1,
+      colors: {
+        h1: 45,
+        s1: 100,
+        l1: 50,
+        h2: 45,
+        s2: 100,
+        l2: 50,
+        h3: 45,
+        s3: 100,
+        l3: 50,
+      },
+      accuracy: 2,
+      hull: 2,
+      speed: 2,
+      mainWeapon: 0, // MainWeapon.Generic
+      armor: 3, // Armor.Heavy
+      shields: 0, // Shields.None
+      special: 0, // Special.None
+    };
+
+    it("reverts InvalidPrizeVariant for variant 0", async function () {
+      const { hookAsOwner } = await loadFixture(deployFixture);
+      await expect(
+        hookAsOwner.write.setPrizeTemplate([
+          { ...validTemplate, variant: 0 },
+        ]),
+      ).to.be.rejectedWith("InvalidPrizeVariant");
+    });
+
+    it("reverts InvalidPrizeVariant for a variant beyond maxVariant", async function () {
+      const { hookAsOwner, ships } = await loadFixture(deployFixture);
+      const maxVariant = await ships.read.maxVariant();
+      await expect(
+        hookAsOwner.write.setPrizeTemplate([
+          { ...validTemplate, variant: maxVariant + 1 },
+        ]),
+      ).to.be.rejectedWith("InvalidPrizeVariant");
+    });
+
+    it("reverts ArmorAndShieldsBothSet when both are non-None", async function () {
+      const { hookAsOwner } = await loadFixture(deployFixture);
+      await expect(
+        hookAsOwner.write.setPrizeTemplate([
+          { ...validTemplate, armor: 3, shields: 1 },
+        ]),
+      ).to.be.rejectedWith("ArmorAndShieldsBothSet");
+    });
+
+    it("reverts InvalidPrizeStatTier when a stat exceeds tier 2", async function () {
+      const { hookAsOwner } = await loadFixture(deployFixture);
+      await expect(
+        hookAsOwner.write.setPrizeTemplate([
+          { ...validTemplate, accuracy: 3 },
+        ]),
+      ).to.be.rejectedWith("InvalidPrizeStatTier");
+    });
+
+    it("accepts a valid template", async function () {
+      const { hookAsOwner, hook } = await loadFixture(deployFixture);
+      await hookAsOwner.write.setPrizeTemplate([
+        { ...validTemplate, hull: 1 },
+      ]);
+      // Solidity's auto-generated getter for a struct returns a positional
+      // tuple, not named fields: [variant, colors, accuracy, hull, speed,
+      // mainWeapon, armor, shields, special].
+      const stored = await hook.read.prizeTemplate();
+      expect(stored[3]).to.equal(1);
+    });
   });
 });
