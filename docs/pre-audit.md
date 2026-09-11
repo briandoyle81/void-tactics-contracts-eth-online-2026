@@ -1266,3 +1266,17 @@ When reveal was collapsed into `fulfillRandomRequest` (see the 2026-08-27 addend
 - **`DeployAndConfig.ts`'s `PRODUCTION` flag now resting at `false`** — the gating logic itself is unchanged (only the boolean's committed value flipped, fixing the opposite mistake from before); flagged only as a known, already-documented process risk (someone could deploy for real without remembering to flip it back to `true`), not a new code defect. Already covered by this session's new `CLAUDE.md` rule requiring the flag be checked before every deploy.
 
 **Test suite impact:** 2 new regression tests (one in each of `test/RandomManager.test.ts`, `test/Lobbies.test.ts`), both confirmed to fail against the pre-fix code and pass against the fix. Full suite reconfirmed clean afterward.
+
+## Addendum — Selfie Check Verification Gap in `FreeShipClaimSelfie` (2026-09-11)
+
+### SC-01 — Unverified `claimFreeShips` Path Left Open, Making Selfie-Check Gating Non-Enforcing
+
+**File:** `contracts/FreeShipClaimSelfie.sol`
+**Severity:** Medium — deliberate, known, and explicitly deferred; not an oversight
+**Status:** Open — intentionally deferred, not yet resolved
+
+`FreeShipClaimSelfie.sol` adds a backend-relayed, Selfie-Check-verified claim path (`claimFreeShipsVerified`, gated by an `authorizedVerifiers` allowlist and per-nullifier reuse tracking) alongside the original `claimFreeShips(uint16)`. Selfie Check has no on-chain verification path (confirmed against World's own docs — verification is an off-chain REST call, unlike Orb's on-chain `groupId=1` path `Tournament.sol` already uses), so the verified path necessarily relies on a trusted backend relayer rather than an on-chain proof check.
+
+The original, fully unrestricted `claimFreeShips(uint16)` was deliberately left callable in this version, per explicit direction. That means the new verification machinery is not actually load-bearing yet: any caller can bypass Selfie Check entirely by calling the old function directly, exactly as before this contract existed. `FreeShipClaimSelfie` as it stands is infrastructure for the eventual gate, not the gate itself.
+
+**Not yet decided:** whether to eventually restrict or remove `claimFreeShips(uint16)` once the verified path is live and trusted, and if so, how to handle the resulting blast radius — the existing test suite (`test/Ships.test.ts`) calls `claimFreeShips` directly in numerous places and would need rework, and free-ship claiming would become hard-dependent on backend availability for the first time. Revisit before treating Selfie Check gating as an actual Sybil defense in the live product, not just a documented capability.

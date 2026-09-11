@@ -46,6 +46,14 @@ When designing, reviewing, or reasoning about any smart contract operation — e
 - This was found and fixed 2026-08-26: `RandomManager.revealRandomnessBatch` initially reverted its entire batch if any single id in it was already revealed. Since `revealRandomness` is deliberately permissionless (anyone can call it, by design — see `RandomManager.sol`), any outside address could front-run one id out of a victim's pending batch for the cost of gas alone, forcing that player back to one-at-a-time reveals with no benefit to the attacker beyond breaking someone else's transaction. The fix (tolerating an already-revealed id as a no-op instead of reverting) only happened after this was explicitly flagged — the first-pass design had reasoned "no outside actor has any reason to do this," which is exactly the assumption to never make.
 - When adding or reviewing any function with no `onlyOwner`/allowlist gate, explicitly ask: "what is the worst thing a purely malicious, zero-profit-seeking caller could do to someone else by calling this, and does the design tolerate it?" — not just "what would a rational, profit-seeking attacker do?"
 
+## Never Use `tx.origin`
+
+Do **not** use `tx.origin` in any contract, for authentication, authorization, or identifying "the real caller/player." Use `msg.sender`; for hook-style callbacks where the immediate caller is a router or other intermediary (e.g. Uniswap v4 hooks), pass the real actor's address explicitly through call data instead of reaching for `tx.origin`.
+
+- `tx.origin` is a well-known phishing-adjacent anti-pattern: a malicious contract can trick a user into a transaction that ends up calling your contract with the user's EOA still set as `tx.origin`, defeating any check based on it.
+- It also silently misattributes actions for anyone interacting through a smart-contract wallet — this project already uses Dynamic for wallet auth, so that's a real case, not a hypothetical one. `tx.origin` resolves to the wallet's underlying signer, not the smart account actually holding funds or making the call.
+- **Found 2026-09-11:** `UTCLotteryHook.sol`'s first draft used `tx.origin` to decide which player should get lottery-entry credit for a swap. Caught before it shipped — the correct fix was decoding the real trader's address from `hookData` (the mechanism Uniswap v4 hooks already provide for exactly this), not `sender` (the calling router, not the trader) or `tx.origin`.
+
 ## Dating Cross-Agent Documents
 
 Any document or set of instructions written for another agent to consume (e.g. a frontend-integration handoff doc, a migration guide) must include the date it was written, near the top. These documents describe contract state at a point in time and go stale as the contracts evolve — a reader needs the date to judge whether the content is still current.

@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { loadFixture } from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
 import hre from "hardhat";
-import { parseEther } from "viem";
+import { parseEther, keccak256, toBytes } from "viem";
 import { deployShipsFixture } from "./fixtures/deployShipsFixture";
 import {
   Ship,
@@ -2457,6 +2457,133 @@ describe("Ships", function () {
   });
 
   describe("Free Ship Claiming", function () {
+    it("emits FreeShipsClaimed with the claimed amount", async function () {
+      const { user1, freeShipClaim } = await loadFixture(deployShipsFixture);
+
+      const hash = await freeShipClaim.write.claimFreeShips([1], {
+        account: user1.account,
+      });
+      const publicClient = await hre.viem.getPublicClient();
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      const events = await freeShipClaim.getEvents.FreeShipsClaimed(
+        undefined,
+        { fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber },
+      );
+      expect(events).to.have.length(1);
+      expect(events[0].args.player?.toLowerCase()).to.equal(
+        user1.account.address.toLowerCase(),
+      );
+      // No DroneStorefront wired in this fixture, so amount is the base 10.
+      expect(events[0].args.amount).to.equal(10n);
+    });
+
+    it("deploy module wires a permissive MockAlwaysEligible by default, so claiming stays open", async function () {
+      const { freeShipClaim } = await loadFixture(deployShipsFixture);
+
+      const providerAddress = await freeShipClaim.read.eligibilityProvider();
+      expect(providerAddress).to.not.equal(
+        "0x0000000000000000000000000000000000000000",
+      );
+      const provider = await hre.viem.getContractAt(
+        "MockAlwaysEligible",
+        providerAddress,
+      );
+      expect(await provider.read.isEligible([providerAddress])).to.equal(
+        true,
+      );
+      // Already exercised by every other test in this block succeeding
+      // against the real, unmocked FreeShipClaim.claimFreeShips path.
+    });
+
+    it("an explicitly unset eligibilityProvider (address zero) also stays open", async function () {
+      const { owner, user1, freeShipClaim } =
+        await loadFixture(deployShipsFixture);
+
+      await freeShipClaim.write.setEligibilityProvider(
+        ["0x0000000000000000000000000000000000000000"],
+        { account: owner.account },
+      );
+      const asUser1 = await hre.viem.getContractAt(
+        "FreeShipClaim",
+        freeShipClaim.address,
+        { client: { wallet: user1 } },
+      );
+      await asUser1.write.claimFreeShips([1]);
+    });
+
+    it("only the owner can set eligibilityProvider", async function () {
+      const { freeShipClaim, user1 } = await loadFixture(deployShipsFixture);
+
+      const provider = await hre.viem.deployContract(
+        "SelfieCheckEligibilityProvider",
+        [user1.account.address],
+      );
+      const asUser1 = await hre.viem.getContractAt(
+        "FreeShipClaim",
+        freeShipClaim.address,
+        { client: { wallet: user1 } },
+      );
+      await expect(
+        asUser1.write.setEligibilityProvider([provider.address]),
+      ).to.be.rejectedWith("OwnableUnauthorizedAccount");
+    });
+
+    it("reverts NotEligible once a provider is wired and the player hasn't been verified", async function () {
+      const { owner, user1, freeShipClaim } =
+        await loadFixture(deployShipsFixture);
+
+      const provider = await hre.viem.deployContract(
+        "SelfieCheckEligibilityProvider",
+        [owner.account.address],
+      );
+      await freeShipClaim.write.setEligibilityProvider([provider.address], {
+        account: owner.account,
+      });
+
+      const asUser1 = await hre.viem.getContractAt(
+        "FreeShipClaim",
+        freeShipClaim.address,
+        { client: { wallet: user1 } },
+      );
+      await expect(
+        asUser1.write.claimFreeShips([1]),
+      ).to.be.rejectedWith("NotEligible");
+    });
+
+    it("succeeds once the wired provider marks the player verified", async function () {
+      const { ships, owner, user1, freeShipClaim } =
+        await loadFixture(deployShipsFixture);
+
+      const provider = await hre.viem.deployContract(
+        "SelfieCheckEligibilityProvider",
+        [owner.account.address],
+      );
+      await freeShipClaim.write.setEligibilityProvider([provider.address], {
+        account: owner.account,
+      });
+      await provider.write.setAuthorizedVerifier(
+        [owner.account.address, true],
+        { account: owner.account },
+      );
+      const nullifierHash = keccak256(toBytes("test-nullifier"));
+      await provider.write.markVerified(
+        [user1.account.address, nullifierHash],
+        { account: owner.account },
+      );
+
+      const asUser1 = await hre.viem.getContractAt(
+        "FreeShipClaim",
+        freeShipClaim.address,
+        { client: { wallet: user1 } },
+      );
+      await asUser1.write.claimFreeShips([1]);
+
+      const shipIds = await ships.read.getShipIdsOwned([
+        user1.account.address,
+      ]);
+      expect(shipIds.length).to.equal(10);
+    });
+
     it("Should allow users to claim free ships initially", async function () {
       const { ships, user1, freeShipClaim } =
         await loadFixture(deployShipsFixture);

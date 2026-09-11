@@ -1,0 +1,12 @@
+---
+description: Never use tx.origin for authentication, authorization, or identifying the real caller in any contract
+alwaysApply: true
+---
+
+# Never use `tx.origin`
+
+Do not use `tx.origin` in any contract, for authentication, authorization, or identifying "the real caller/player." Use `msg.sender`; for hook-style callbacks where the immediate caller is a router or other intermediary (e.g. Uniswap v4 hooks), pass the real actor's address explicitly through call data instead of reaching for `tx.origin`.
+
+- `tx.origin` is a well-known phishing-adjacent anti-pattern: a malicious contract can trick a user into a transaction that ends up calling your contract with the user's EOA still set as `tx.origin`, defeating any check based on it.
+- It also silently misattributes actions for anyone interacting through a smart-contract wallet — this project already uses Dynamic for wallet auth, so that's a real case, not a hypothetical one. `tx.origin` resolves to the wallet's underlying signer, not the smart account actually holding funds or making the call.
+- Found 2026-09-11: `UTCLotteryHook.sol`'s first draft used `tx.origin` to decide which player should get lottery-entry credit for a swap. Caught before it shipped — the correct fix was decoding the real trader's address from `hookData` (the mechanism Uniswap v4 hooks already provide for exactly this), not `sender` (the calling router, not the trader) or `tx.origin`.

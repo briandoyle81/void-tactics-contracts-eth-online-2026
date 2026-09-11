@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./IShips.sol";
 import "./IDroneStorefront.sol";
+import "./IEligibilityProvider.sol";
 
 // Recurring free-ship claim, split out of Ships.sol entirely (which has
 // almost no bytecode headroom left) and built on the same
@@ -15,12 +16,25 @@ contract FreeShipClaim is Ownable, ReentrancyGuard {
     IShips public ships;
     address public droneStorefront;
 
+    // Same swappable-provider shape as Ships.sol/Tournament.sol's
+    // IRandomManager: this contract doesn't know or care how eligibility is
+    // established, only whether IEligibilityProvider says yes. Unset
+    // (address(0), the default) means claiming stays fully open — matches
+    // today's behavior exactly, no gating until the owner deliberately wires
+    // a real provider (e.g. SelfieCheckEligibilityProvider.sol) in. See
+    // docs/pre-audit.md's SC-01 addendum.
+    IEligibilityProvider public eligibilityProvider;
+
     mapping(address => uint256) public lastClaimTimestamp;
 
     // 4 weeks in seconds (28 days * 24 hours * 60 minutes * 60 seconds)
     uint256 public claimCooldownPeriod = 28 days;
 
+    event FreeShipsClaimed(address indexed player, uint256 amount);
+    event EligibilityProviderSet(address indexed provider);
+
     error ClaimCooldownNotPassed();
+    error NotEligible(address player);
 
     constructor(address _ships) Ownable(msg.sender) {
         ships = IShips(_ships);
@@ -36,7 +50,20 @@ contract FreeShipClaim is Ownable, ReentrancyGuard {
         claimCooldownPeriod = _newCooldownPeriod;
     }
 
+    function setEligibilityProvider(
+        address _eligibilityProvider
+    ) external onlyOwner {
+        eligibilityProvider = IEligibilityProvider(_eligibilityProvider);
+        emit EligibilityProviderSet(_eligibilityProvider);
+    }
+
     function claimFreeShips(uint16 _variant) external nonReentrant {
+        if (address(eligibilityProvider) != address(0)) {
+            if (!eligibilityProvider.isEligible(msg.sender)) {
+                revert NotEligible(msg.sender);
+            }
+        }
+
         uint256 lastClaim = lastClaimTimestamp[msg.sender];
         uint256 currentTime = block.timestamp;
 
@@ -61,6 +88,9 @@ contract FreeShipClaim is Ownable, ReentrancyGuard {
             ? 0
             : IDroneStorefront(droneStorefront).droneCoreTier(msg.sender);
 
-        ships.createShips(msg.sender, 10 + bonus, _variant, 0, true);
+        uint256 amount = 10 + bonus;
+        emit FreeShipsClaimed(msg.sender, amount);
+
+        ships.createShips(msg.sender, amount, _variant, 0, true);
     }
 }

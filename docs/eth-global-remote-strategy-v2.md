@@ -26,22 +26,68 @@ authorized-minter/allowlist pattern, not grown in place.
 ## Pick 1 — The Graph: "Best Use of Composable or Standardized Graph Products"
 
 $5,000 pool (1st $2,500 / 2nd $1,500 / 3rd $1,000). Not Continuity-restricted — open to both
-pools.
+pools. "Live data" just means not mocked/local/static per the track's own text — testnet data via
+Subgraph Studio genuinely qualifies.
 
-**Build:**
+**Hard dependency on Pick 3 (accepted, not hedged):** the track requires either composing 2+
+Graph products or building meaningfully on a standardized schema (`docs/eth-global-remote.md`
+lines 25-27) — plain "query one Subgraph with no standardization" explicitly does not qualify,
+and the fallback the track names for that case is the AI track, which is deliberately not being
+pursued. This plan uses exactly one Graph product (a Subgraph) and gets its only standardization
+story from the Messari DEX-AMM schema applied to the Uniswap pool in Pick 3 — every other data
+source below is plain custom entities with no standards story of its own. **If Pick 3 (Uniswap)
+doesn't ship, Pick 1 loses its eligibility path for this track entirely** — there is no budgeted
+fallback (e.g. a real Substreams composition) if that happens. Treat Pick 3 shipping, with a
+genuinely complete DEX-AMM implementation (the real protocol-wide aggregation entities, not just a
+`Swap` listener), as a hard prerequisite for Pick 1, not a nice-to-have.
 
-- A Subgraph indexing UTC (`UniversalCredits.sol`), DEC (`DroneEnergyCores.sol`), Ships
-  (`Ships.sol`), and `ShatteredHiveMedal.sol` transfer/mint/burn activity using a **Messari
-  Standardized Subgraph schema** for ERC-20/ERC-721, rather than ad-hoc custom entities.
-- Custom entities layered on top, in the same subgraph, for data with no standard schema to map
-  to: `GameResults` (wins/losses), `Tournament` (registrations, brackets, match results), and
-  `FreeShipClaim`/`TutorialClaim` claim events.
-- **Prerequisite:** `FreeShipClaim.sol` currently emits no events at all — add one before it can
-  be indexed. Cheap (standalone contract, no size pressure).
-- Consume live data via a Subgraph Studio API key — mocked/local data does not qualify.
-- If Pick 3 ends up being Uniswap, the subgraph also indexes that pool's native `Swap` events
-  (emitted by v4's `PoolManager` singleton regardless of any hook) — no extra contract work needed
-  for that.
+**Tooling, confirmed current:** `@graphprotocol/graph-cli@0.98.1`,
+`@graphprotocol/graph-ts@0.38.2`, manifest `specVersion: 1.3.0`, mapping `apiVersion: 0.0.9`,
+network string `base-sepolia` (chain id 84532 — confirmed indexable via Subgraph Studio). Studio's
+free tier (100,000 queries/month) covers a demo dashboard with no billing setup needed.
+
+**Contracts to index, with real event surfaces (verified by reading the source, not assumed) and
+real deployment block numbers (from `ignition/deployments/chain-84532/journal.jsonl`, use as each
+data source's `startBlock`):**
+
+- **`UniversalCredits.sol`** (UTC) — block 46381910. Plain ERC-20, standard `Transfer` only, no
+  custom mint/burn events, no `_update` override. Custom entities, straightforward.
+- **`DroneEnergyCores.sol`** (DEC) — block 46381267. Same as UTC — plain ERC-20, no surprises.
+- **`Ships.sol`** — block 46381843. **Not plain ERC-721 — implements ERC-5192 (lockable).**
+  `_update` emits `Locked`/`Unlocked` alongside `Transfer`, and transfers **revert unless both
+  sender and receiver have `amountPurchased >= 10`** (a real, previously-undocumented gate). The
+  schema must model lock state and this transfer restriction — a naive "index Transfer" design
+  would misrepresent actual ship movement, since most addresses can't receive/send ships at all
+  until they've bought 10.
+- **`ShatteredHiveMedal.sol`** — block 46381965. **Unconditionally soulbound** — `_update` reverts
+  on any post-mint transfer. There is no provenance to show, ever, beyond the single mint event.
+- **`GameResults.sol`** — block 46381268. Real events: `GameResultRecorded(gameId, winner, loser,
+  timestamp)`, `PlayerStatsUpdated(player, wins, losses, totalGames)`.
+- **`Tournament.sol`** — block 46382113. **16 events**, richer than originally scoped:
+  `TournamentCreated`, `SponsorAdded`, `Registered` (carries `nullifierHash` — direct input for
+  the abuse-detection panel), `TournamentClosing`/`TournamentStarted` (the two-step randomness
+  reveal), `MatchGameAssigned`, `MatchResolved` (carries a `walrusBlobId` field — a dead reference
+  to the now-permanently-disabled Walrus system; index it but don't present it as working replay
+  data), `NextRoundMatchCreated`, `TournamentFinalized`, `PrizeClaimed`, `TournamentCancelled`,
+  `Refunded`, `MatchForfeited`, `MatchStalled`, `WinEffectsSet`, `WinEffectFailed`.
+- **`FreeShipClaim.sol`** — block 46381854. Emits `FreeShipsClaimed(player, amount)` **in source
+  only** — confirmed not yet in the live Base Sepolia deployment or the frontend's compiled ABI.
+  Cannot be indexed until a real redeploy happens (blocked on explicit deploy authorization, not
+  an open task).
+- **`TutorialClaim.sol`** — block 46381909. Already emits `TutorialCompleted(player, winPath,
+  shipsCreated)` — indexable as-is.
+
+**Standardized schema, scoped correctly:** Messari's schemas are organized by DeFi protocol
+category (DEX/AMM, lending, yield, NFT marketplace) — not a generic token schema, and a poor,
+forced fit for plain game tokens. Use Messari's **DEX-AMM schema**
+(`schema-dex-amm.graphql`, MIT-licensed, confirmed to exist in `messari/subgraphs`) **only for the
+Uniswap v4 pool from Pick 3.** Note it's protocol-shaped, not single-swap-shaped — using it
+"meaningfully" per the track's own language means populating its protocol-wide aggregation
+entities (`DexAmmProtocol`, daily usage/financial snapshots), not just listening for `Swap`
+events; budget real effort here, not a drop-in listener. UTC/DEC/Ships/Medal/GameResults/
+Tournament/claims are all plain custom entities alongside it — that's fine, the track's
+qualification is "compose 2+ products OR build on a standardized schema," not "everything must be
+standardized."
 
 **Dashboard** (frontend deliverable, lives in the separate frontend repo, not this one — depends
 on the subgraph being deployed first): one panel per real use case —
@@ -49,12 +95,13 @@ on the subgraph being deployed first): one panel per real use case —
 1. **Player history** — per-wallet win/loss, tournament, and claim history. Replaces the
    frontend's current raw-event-log scanning.
 2. **Abuse detection** — flags same-block-funded wallet clusters and repeat-claim attempts against
-   `FreeShipClaim`/`TutorialClaim`. Ops-facing, not player-facing; doubles as before/after evidence
-   for the Selfie Check gating in Pick 2.
-3. **Economy transparency** — UTC/DEC supply, mint/burn rate, top holders, via the standardized
-   ERC-20 entities. Public-facing.
-4. **Ship/medal provenance** — per-token ownership/transfer history via the standardized ERC-721
-   entities.
+   `FreeShipClaim`/`TutorialClaim`, using `Tournament.Registered`'s `nullifierHash` as a
+   cross-reference signal. Ops-facing, not player-facing; doubles as before/after evidence for the
+   Selfie Check gating in Pick 2.
+3. **Economy transparency** — UTC/DEC supply, mint/burn rate, top holders. Public-facing.
+4. **Ship lock/ownership panel** (replaces "ship/medal provenance" — dropped, see above). Ships:
+   lock state and real transfer history subject to the `amountPurchased >= 10` gate. Medal:
+   one-time mint ownership record only, not a transfer history — it can never have one.
 
 Deliverable: public repo, README pointing at the relevant contracts/lines, demo showing the
 dashboard against live Base Sepolia data.
@@ -90,7 +137,9 @@ Chainlink VRF is **explicitly declined** by the project owner — not under cons
 ### Primary — Uniswap: "Best Uniswap Stack Contribution" (Continuity), $2,000 (1st $1,000 / 2nd $1,000)
 
 Confirmed as real, independent product value (a genuine UTC secondary market), not just a
-hackathon target.
+hackathon target. **Also now a hard prerequisite for Pick 1's eligibility** — see Pick 1 above:
+Pick 1's only standardized-schema story is the Messari DEX-AMM schema applied to this pool, with
+no budgeted fallback if this pick doesn't ship.
 
 **Build:**
 

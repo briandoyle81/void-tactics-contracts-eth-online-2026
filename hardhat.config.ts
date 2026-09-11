@@ -9,14 +9,130 @@ const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY as string;
 
 const config: HardhatUserConfig = {
   solidity: {
-    version: "0.8.28",
-    settings: {
-      // viaIR: true, // Yul stack issues in this repo; runs:1 keeps Game under 24 KiB
-      optimizer: {
-        enabled: true,
-        runs: 1,
+    compilers: [
+      {
+        version: "0.8.28",
+        settings: {
+          // viaIR: true, // Yul stack issues in this repo; runs:1 keeps Game under 24 KiB
+          optimizer: {
+            enabled: true,
+            runs: 1,
+          },
+        },
       },
-    },
+      {
+        // Only @uniswap/v4-core/src/PoolManager.sol needs this — it pins an
+        // exact `pragma solidity 0.8.26;` rather than a caret range, unlike
+        // every other Uniswap v4 file this repo imports (all `^0.8.x`,
+        // compatible with 0.8.28 already). Added for
+        // contracts/mocks/UniswapV4TestImports.sol / UTCLotteryHook.sol's
+        // real-swap integration tests.
+        version: "0.8.26",
+        settings: {
+          // Uniswap v4 core uses transient storage (tload/tstore, EIP-1153)
+          // throughout — requires at least Cancun; the default target for
+          // this compiler version otherwise rejects those opcodes.
+          evmVersion: "cancun",
+          optimizer: {
+            enabled: true,
+            runs: 1,
+          },
+        },
+      },
+    ],
+    // Deliberately NOT applied to the main 0.8.28 compiler above: PoolManager
+    // itself needs viaIR to avoid a stack-too-deep error, but viaIR is
+    // already off there on purpose (see that entry's comment) to keep
+    // Game.sol under the 24 KiB limit — turning it on globally would risk
+    // exactly that regression. These three files (and whatever they alone
+    // pull in — Uniswap's own PoolManager/PoolTestBase graph, which uses
+    // transient storage throughout) get isolated into their own compiler
+    // job instead, entirely separate from this repo's own contracts.
+    overrides: Object.fromEntries(
+      [
+        // Full transitive import closure of PoolManager.sol +
+        // PoolSwapTest.sol + PoolModifyLiquidityTest.sol, computed by
+        // walking their actual import graphs rather than guessed — Hardhat
+        // overrides apply per listed file only, NOT transitively to that
+        // file's own imports, so every file in the closure needs its own
+        // entry or it silently falls back to the default (Paris, no viaIR)
+        // job and fails on tload/tstore or PoolManager's stack depth.
+        "@uniswap/v4-core/src/ERC6909.sol",
+        "@uniswap/v4-core/src/ERC6909Claims.sol",
+        "@uniswap/v4-core/src/Extsload.sol",
+        "@uniswap/v4-core/src/Exttload.sol",
+        "@uniswap/v4-core/src/NoDelegateCall.sol",
+        "@uniswap/v4-core/src/PoolManager.sol",
+        "@uniswap/v4-core/src/ProtocolFees.sol",
+        "@uniswap/v4-core/src/interfaces/IExtsload.sol",
+        "@uniswap/v4-core/src/interfaces/IExttload.sol",
+        "@uniswap/v4-core/src/interfaces/IHooks.sol",
+        "@uniswap/v4-core/src/interfaces/IPoolManager.sol",
+        "@uniswap/v4-core/src/interfaces/IProtocolFees.sol",
+        "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol",
+        "@uniswap/v4-core/src/interfaces/external/IERC20Minimal.sol",
+        "@uniswap/v4-core/src/interfaces/external/IERC6909Claims.sol",
+        "@uniswap/v4-core/src/libraries/BitMath.sol",
+        "@uniswap/v4-core/src/libraries/CurrencyDelta.sol",
+        "@uniswap/v4-core/src/libraries/CurrencyReserves.sol",
+        "@uniswap/v4-core/src/libraries/CustomRevert.sol",
+        "@uniswap/v4-core/src/libraries/FixedPoint128.sol",
+        "@uniswap/v4-core/src/libraries/FixedPoint96.sol",
+        "@uniswap/v4-core/src/libraries/FullMath.sol",
+        "@uniswap/v4-core/src/libraries/Hooks.sol",
+        "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol",
+        "@uniswap/v4-core/src/libraries/LiquidityMath.sol",
+        "@uniswap/v4-core/src/libraries/Lock.sol",
+        "@uniswap/v4-core/src/libraries/NonzeroDeltaCount.sol",
+        "@uniswap/v4-core/src/libraries/ParseBytes.sol",
+        "@uniswap/v4-core/src/libraries/Pool.sol",
+        "@uniswap/v4-core/src/libraries/Position.sol",
+        "@uniswap/v4-core/src/libraries/ProtocolFeeLibrary.sol",
+        "@uniswap/v4-core/src/libraries/SafeCast.sol",
+        "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol",
+        "@uniswap/v4-core/src/libraries/StateLibrary.sol",
+        "@uniswap/v4-core/src/libraries/SwapMath.sol",
+        "@uniswap/v4-core/src/libraries/TickBitmap.sol",
+        "@uniswap/v4-core/src/libraries/TickMath.sol",
+        "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol",
+        "@uniswap/v4-core/src/libraries/UnsafeMath.sol",
+        "@uniswap/v4-core/src/test/PoolModifyLiquidityTest.sol",
+        "@uniswap/v4-core/src/test/PoolSwapTest.sol",
+        "@uniswap/v4-core/src/test/PoolTestBase.sol",
+        "@uniswap/v4-core/src/types/BalanceDelta.sol",
+        "@uniswap/v4-core/src/types/BeforeSwapDelta.sol",
+        "@uniswap/v4-core/src/types/Currency.sol",
+        "@uniswap/v4-core/src/types/PoolId.sol",
+        "@uniswap/v4-core/src/types/PoolKey.sol",
+        "@uniswap/v4-core/src/types/PoolOperation.sol",
+        "@uniswap/v4-core/src/types/Slot0.sol",
+        "@uniswap/v4-core/test/utils/CurrencySettler.sol",
+      ].map((path) => [
+        path,
+        {
+          version: "0.8.26",
+          settings: {
+            evmVersion: "cancun",
+            viaIR: true,
+            optimizer: { enabled: true, runs: 1 },
+          },
+        },
+      ]),
+    ),
+  },
+  mocha: {
+    // Default (40s) is no longer reliably enough for a cold loadFixture
+    // deploy — confirmed across several files this session (Ships.test.ts,
+    // DroneEnergyCores.test.ts, others), most likely from the extra
+    // artifact-loading overhead of the real Uniswap v4-core PoolManager
+    // dependency (see UTCLotteryHookSwap.test.ts). A timed-out fixture call
+    // doesn't actually cancel — it keeps running underneath — so a later
+    // test's own loadFixture call collides with it and corrupts Hardhat
+    // Ignition's nonce tracking for the rest of that process (IGN403),
+    // cascading into unrelated-looking failures well past the real slow
+    // point. Raising the timeout fixes the root cause, not just this file's
+    // symptom.
+    timeout: 120_000,
   },
   contractSizer: {
     alphaSort: true,

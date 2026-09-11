@@ -1729,6 +1729,23 @@ const DeployModule = buildModule("DeployModule", (m) => {
     [droneStorefront],
   );
 
+  // eligibilityProvider mirrors the shipNames mock-vs-real split: local/test
+  // deploys wire a mock that's always permissive, keeping
+  // FreeShipClaim.claimFreeShips's provider-wired code path exercised by the
+  // shared fixture without depending on the real Selfie Check backend-relay
+  // infrastructure (which has no on-chain verification path of its own —
+  // see SelfieCheckEligibilityProvider.sol). Production leaves this unset
+  // for now (fully open, today's behavior) — the real
+  // SelfieCheckEligibilityProvider isn't deployed/wired yet; revisit once
+  // Selfie Check gating is actually ready to go live.
+  let eligibilityProvider: any;
+  if (!PRODUCTION) {
+    eligibilityProvider = m.contract("MockAlwaysEligible");
+  }
+  const setFreeShipClaimEligibilityProviderCall = eligibilityProvider
+    ? m.call(freeShipClaim, "setEligibilityProvider", [eligibilityProvider])
+    : undefined;
+
   // FreeShipClaim mints through Ships' existing authorized-minter allowlist,
   // same as DroneYard/ShipPurchaser/TutorialClaim.
   const allowFreeShipClaimToCreateShipsCall = m.call(
