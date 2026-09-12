@@ -28,8 +28,11 @@ const PRODUCTION = false;
 const FIREBASE_FLOW_MINTER = "0x7f9dc2D68FF842EC79DA722B68E3ca7e5aa31CCb";
 
 // Address allowed to create/edit preset maps (in addition to the owner). Lets
-// map editing be done from a wallet other than the deployer/owner.
-const MAP_EDITOR = "0x69a5B3aE8598fC5A5419eaa1f2A59Db2D052e346";
+// map editing be done from a wallet other than the deployer/owner. Exported
+// so standalone post-deploy scripts (e.g. scripts/deployUTCLotteryPool.ts)
+// can reference the same real owner address instead of hardcoding a second,
+// driftable copy of it.
+export const MAP_EDITOR = "0x69a5B3aE8598fC5A5419eaa1f2A59Db2D052e346";
 
 // groupId 1 == Orb (the only credential type supported for on-chain verification).
 const TOURNAMENT_WORLD_ID_GROUP = 1n;
@@ -74,7 +77,7 @@ const MAX_SANE_ETH_USD_PRICE = 50_000;
 //
 // Only ever called when PRODUCTION is true; tests use TEST_ETH_USD_PRICE
 // and never reach this function, so they never depend on network access.
-function getEthUsdPrice(): number {
+export function getEthUsdPrice(): number {
   const raw = execSync(
     "curl -sf --max-time 10 'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd'",
     { encoding: "utf-8" },

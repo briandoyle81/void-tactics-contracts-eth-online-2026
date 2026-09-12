@@ -9,7 +9,7 @@ pragma solidity ^0.8.28;
 // mined offline (see scripts/hookMiner.ts) against it, then used here.
 //
 // On most real networks the canonical, already-deployed
-// 0x4e59b44847b379578588920cA78FbF26c0B4956 "deterministic deployment
+// 0x4e59b44847b379578588920cA78FbF26c0B4956C "deterministic deployment
 // proxy" (from a well-known keyless transaction) serves this exact purpose
 // and could be targeted directly instead of this contract — but it isn't
 // pre-seeded on Hardhat's local ephemeral network, so this exists for

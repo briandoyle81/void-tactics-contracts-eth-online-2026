@@ -10,7 +10,7 @@
 // Usable against either a locally-controlled `Create2Deployer.sol` instance
 // (see that file's own header — needed on Hardhat's local network, which
 // doesn't pre-seed the canonical deployer proxy) or, for a real deploy, the
-// canonical 0x4e59b44847b379578588920cA78FbF26c0B4956 deterministic
+// canonical 0x4e59b44847b379578588920cA78FbF26c0B4956C deterministic
 // deployment proxy already present on most real networks — this module only
 // needs a deployer *address* and doesn't care which kind it is, as long as
 // mining and the actual deployment both target the same one.

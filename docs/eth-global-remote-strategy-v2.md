@@ -259,9 +259,45 @@ no budgeted fallback if this pick doesn't ship.
    `minTotalWeightWei` (0) are all live, sensible-but-not-yet-validated defaults — worth
    confirming against real expected trading volume once there's live data to check them against,
    not left as permanent assumptions.
-2. No pool has actually been deployed yet (build items 1-3 above are still real deploy-time work,
-   Base Sepolia only, per this repo's deploy-safety rules) — `UTCLotteryHook.sol` itself is built
-   and tested against a real local `PoolManager`, but isn't live anywhere.
+2. **No pool has actually been deployed yet, but a concrete deploy plan is written (2026-09-12).**
+   `UTCLotteryHook.sol` itself is built and tested against a real local `PoolManager`, but isn't
+   live anywhere. A new standalone script, `scripts/deployUTCLotteryPool.ts` (not yet written —
+   see the plan), will mine a CREATE2 salt, deploy the hook, initialize the real pool, seed
+   initial liquidity, grant the hook ship-minting rights, and run a real smoke-test swap on Base
+   Sepolia, following exactly this repo's already-proven local test recipe
+   (`test/UTCLotteryHookSwap.test.ts`) against real infrastructure instead of local test doubles.
+   - **Real Base Sepolia addresses confirmed this session** (independently verified via live
+     `eth_getCode`, not assumed): `PoolManager` `0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408`;
+     `PoolSwapTest` `0x8b5bcc363dde2614281ad875bad385e0a785d3b9`; `PoolModifyLiquidityTest`
+     `0x37429cd17cb1454c34e7f50b09725202fd533039` (Uniswap's own official testnet routers, real
+     deployed contracts, not something this repo compiles/deploys itself); canonical CREATE2
+     "deterministic deployment proxy" `0x4e59b44847b379578588920cA78FbF26c0B4956C`.
+   - **Bug found and fixed:** `contracts/Create2Deployer.sol`'s own header comment had the
+     canonical CREATE2 proxy address truncated by one trailing character (39 hex digits, not a
+     valid address) — corrected to the address above.
+   - **Risk framing, deliberately re-scoped:** the hook's pool-lock mechanic
+     (`PoolManager.initialize`'s first successful call against a hook address permanently binds
+     it to one pool — `PoolAlreadyLocked()` on any later call, no on-chain fix) is real, but is
+     **not currently high-stakes**: there's no canonical `UniversalCredits` token or accumulated
+     pool history yet, and this repo already expects repeated full test redeploys. If a hook
+     gets locked to the wrong pool, the fix is just mining and deploying a fresh hook address —
+     cheap, a few minutes, free testnet gas. So the deploy script favors low-friction,
+     non-interactive safety checks (state re-reads, `simulateContract` dry-runs, loud aborts on
+     genuine anomalies) over manual confirmation ceremony for now, with an explicit note on
+     where to add heavier ceremony back in once a pool is meant to be long-lived (production, or
+     a testnet iteration the team decides to stop churning).
+   - **Key-custody decision:** a separate `SHIP_MINTER_PRIVATE_KEY` has been added to `.env`
+     specifically for the one owner-gated call this whole flow needs
+     (`Ships.setIsAllowedToCreateShips(hookAddress, true)`, since `Ships` ownership transfers to
+     `MAP_EDITOR` at the end of the main game redeploy) — the script verifies this key's address
+     against `Ships.owner()` at runtime rather than assuming it matches.
+   - **LP seed sizing decision:** not precision-critical, per explicit direction ("we can mint at
+     will and we'll likely redeploy several times in testing") — defaults to a live-computed
+     ~$10-equivalent of UC, sourced through `ShipPurchaser.purchaseUTCWithFlow` (not a direct
+     authorized mint) so the pool's initial price is automatically consistent with the real
+     mint-rate ceiling this design already relies on.
+   - Full step-by-step plan: `/Users/briandoyle/.claude/plans/gentle-launching-naur.md` (local
+     plan file, not checked into this repo).
 3. The prize queue starts empty — no `PrizeTemplate`s have actually been curated/queued yet; until
    the owner does, every draw uses the random-4-star fallback.
 4. `fallbackVariant` defaults to `1` (owner-configurable) — worth confirming that's actually the
