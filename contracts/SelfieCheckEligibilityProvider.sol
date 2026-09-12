@@ -45,6 +45,8 @@ contract SelfieCheckEligibilityProvider is IEligibilityProvider, Ownable {
         bytes32 indexed nullifierHash,
         uint256 verifiedUntil
     );
+    event AuthorizedVerifierSet(address indexed verifier, bool isAuthorized);
+    event NullifierCheckEnabledSet(bool enabled);
 
     error NotAuthorizedVerifier(address caller);
     error NullifierAlreadyUsed(bytes32 nullifierHash);
@@ -56,10 +58,12 @@ contract SelfieCheckEligibilityProvider is IEligibilityProvider, Ownable {
         bool _isAuthorized
     ) external onlyOwner {
         authorizedVerifiers[_verifier] = _isAuthorized;
+        emit AuthorizedVerifierSet(_verifier, _isAuthorized);
     }
 
     function setNullifierCheckEnabled(bool _enabled) external onlyOwner {
         nullifierCheckEnabled = _enabled;
+        emit NullifierCheckEnabledSet(_enabled);
     }
 
     // Backend-only entry point. Called after the backend has independently

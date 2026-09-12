@@ -1729,20 +1729,43 @@ const DeployModule = buildModule("DeployModule", (m) => {
     [droneStorefront],
   );
 
-  // eligibilityProvider mirrors the shipNames mock-vs-real split: local/test
-  // deploys wire a mock that's always permissive, keeping
+  // eligibilityProvider mirrors the shipNames/worldId mock-vs-real split:
+  // local/test deploys wire a mock that's always permissive, keeping
   // FreeShipClaim.claimFreeShips's/TutorialClaim's provider-wired code path
   // exercised by the shared fixture without depending on the real Selfie
   // Check backend-relay infrastructure (which has no on-chain verification
-  // path of its own — see SelfieCheckEligibilityProvider.sol). Production
-  // leaves this unset for now (fully open, today's behavior) — the real
-  // SelfieCheckEligibilityProvider isn't deployed/wired yet; revisit once
-  // Selfie Check gating is actually ready to go live. One mock instance is
-  // shared by both consumers — it's stateless (always returns true), so
-  // there's nothing gained by deploying two.
+  // path of its own — see SelfieCheckEligibilityProvider.sol).
+  //
+  // Decided (2026-09-11): ONE eligibilityProvider instance is shared by both
+  // FreeShipClaim and TutorialClaim, not one each — verifying once makes a
+  // player eligible for both for the same 90-day window.
+  //
+  // Production (2026-09-11): deploys the real SelfieCheckEligibilityProvider,
+  // owned by the deployer initially and handed to MAP_EDITOR in the
+  // ownership-handover block below, same as every other Ownable contract in
+  // this module. Reuses FIREBASE_FLOW_MINTER as the authorized verifier too
+  // (per explicit direction) — the same backend wallet already trusted to
+  // mint ships directly now also relays Selfie Check verification, rather
+  // than provisioning a second backend signer just for this. Note:
+  // FIREBASE_FLOW_MINTER/MAP_EDITOR are today's dev-time placeholder
+  // addresses, not final production keys — see docs/pre-audit.md's
+  // "Addendum — Admin/Backend Key Separation for Production Deploy" for the
+  // plan to replace all of these with distinct, purpose-specific keys before
+  // a real deploy.
   let eligibilityProvider: any;
+  let setSelfieCheckAuthorizedVerifierCall: any;
   if (!PRODUCTION) {
     eligibilityProvider = m.contract("MockAlwaysEligible");
+  } else {
+    eligibilityProvider = m.contract("SelfieCheckEligibilityProvider", [
+      m.getAccount(0),
+    ]);
+    setSelfieCheckAuthorizedVerifierCall = m.call(
+      eligibilityProvider,
+      "setAuthorizedVerifier",
+      [FIREBASE_FLOW_MINTER, true],
+      { id: "SetSelfieCheckAuthorizedVerifier" },
+    );
   }
   const setFreeShipClaimEligibilityProviderCall = eligibilityProvider
     ? m.call(freeShipClaim, "setEligibilityProvider", [eligibilityProvider], {
@@ -2199,6 +2222,15 @@ const DeployModule = buildModule("DeployModule", (m) => {
     m.call(gameBlobRegistry, "transferOwnership", [MAP_EDITOR], {
       id: "TransferGameBlobRegistryOwnership",
     });
+
+    m.call(eligibilityProvider, "transferOwnership", [MAP_EDITOR], {
+      id: "TransferSelfieCheckEligibilityProviderOwnership",
+      after: [
+        setFreeShipClaimEligibilityProviderCall!,
+        setTutorialClaimEligibilityProviderCall!,
+        setSelfieCheckAuthorizedVerifierCall,
+      ],
+    });
   }
 
   return {
@@ -2292,6 +2324,7 @@ const DeployModule = buildModule("DeployModule", (m) => {
     shatteredHiveMedalArt,
     tutorialClaim,
     freeShipClaim,
+    eligibilityProvider,
     worldId,
     tournament,
     gameBlobRegistry,

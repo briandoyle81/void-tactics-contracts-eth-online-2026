@@ -136,26 +136,44 @@ address relays the result on-chain):
   wallets.
 - **`contracts/MockAlwaysEligible.sol`** — local/test stand-in wired by `DeployAndConfig.ts` for
   non-production deploys, mirroring the existing `shipNames`/`MockOnchainRandomShipNames` pattern.
-  One shared instance serves both consumers below (it's stateless).
-- **`FreeShipClaim.sol` and `TutorialClaim.sol` both gated, built and tested.** Each got an
-  `eligibilityProvider` field + owner-only `setEligibilityProvider`; unset (`address(0)`, the
-  default) means claiming/completing stays fully open — today's behavior exactly, no gating until
-  the owner deliberately wires a real provider. `TutorialClaim.sol` needed `Ownable` added first —
-  it previously had no admin surface at all. The check sits in `FreeShipClaim.claimFreeShips`
-  directly, and in `TutorialClaim._markTutorialCompleted` (the shared internal helper both
-  `completeTutorialWinPath`/`completeTutorialLossPath` call), so one check point covers both
-  entry points. 9 dedicated tests across the two contracts (default-permissive, owner-only
-  setter, blocked-when-unverified, succeeds-once-verified). Sizes: `FreeShipClaim` 1.631 → 1.959
-  KiB, `TutorialClaim` 3.088 → 3.834 KiB deployed — no pressure on either.
-- **Known, deliberate gap** (tracked in `docs/pre-audit.md`, addendum SC-01): the old,
-  fully-unrestricted `claimFreeShips`/`completeTutorialWinPath`/`completeTutorialLossPath` paths
-  are left callable as-is — the new eligibility check is additive, not yet enforced as the *only*
-  path. Whether/how to restrict the old paths once a real provider is live is a separate,
-  not-yet-made decision — doing so would need rework of the existing test suite (`Ships.test.ts`
-  calls `claimFreeShips` directly in many places) and makes claiming hard-dependent on backend
-  availability for the first time.
+- **Decided: one shared `eligibilityProvider` instance for both consumers, not two.** Verifying
+  once makes a player eligible for both `FreeShipClaim` and `TutorialClaim` for the same 90-day
+  window — `DeployAndConfig.ts` already wires one shared `MockAlwaysEligible` instance to both for
+  non-production; the real `SelfieCheckEligibilityProvider` gets deployed and wired the same way
+  when production is ready.
+- **`FreeShipClaim.sol` and `TutorialClaim.sol` — each has exactly one claim/complete entry
+  point, and it's the gated one.** There is no separate "verified" function coexisting with an
+  unrestricted original — that was `FreeShipClaimSelfie.sol`'s shape (deleted; see
+  `docs/eth-global-remote-strategy.md`'s addendum for that history). The eligibility check is
+  built directly into `FreeShipClaim.claimFreeShips` and into `TutorialClaim._markTutorialCompleted`
+  (the shared internal helper both `completeTutorialWinPath`/`completeTutorialLossPath` call).
+  Unset (`address(0)`, today's default) means claiming/completing stays fully open — the same
+  "not configured yet" pattern as `FreeShipClaim.droneStorefront == address(0)` elsewhere in this
+  repo, not a gate with a bypass door. Once a real provider is wired, both are genuinely, fully
+  gated with no alternate path. `TutorialClaim.sol` needed `Ownable` added first — it previously
+  had no admin surface at all. 9 dedicated tests across the two contracts (default-permissive,
+  owner-only setter, blocked-when-unverified, succeeds-once-verified). Sizes: `FreeShipClaim`
+  1.631 → 1.959 KiB, `TutorialClaim` 3.088 → 3.834 KiB deployed — no pressure on either.
 - Deliverable also requires a feedback document (World ID docs, Developer Portal, Sandbox App
   experience) — not yet written.
+
+**Production deploy wiring — built 2026-09-11.** `DeployAndConfig.ts`'s `PRODUCTION` branch now
+deploys the real `SelfieCheckEligibilityProvider` (one shared instance, per the decision above),
+owned by the deployer initially and handed to `MAP_EDITOR` in the same end-of-module
+ownership-handover block every other `Ownable` contract goes through, then wires it to both
+`FreeShipClaim` and `TutorialClaim` via the existing shared `setEligibilityProvider` calls (no new
+wiring code needed there — they already accepted whatever `eligibilityProvider` resolved to).
+Also calls `setAuthorizedVerifier(FIREBASE_FLOW_MINTER, true)` — the same backend wallet already
+trusted to mint ships directly now also relays Selfie Check verification, per explicit direction,
+rather than provisioning a second backend signer for it. Confirmed with `npx tsc --noEmit` (catches
+the untested `PRODUCTION` branch, since local/test runs only ever exercise the `!PRODUCTION` mock
+path) and a full test run (650/650 passing).
+
+**Known placeholder, not final:** `FIREBASE_FLOW_MINTER` and `MAP_EDITOR` are today's dev-time
+addresses reused across several independent trust roles (ship minting, Selfie Check verification,
+map/content editing, and general contract ownership). Before a real production deploy, all
+admin/backend keys get separated into distinct, purpose-specific keys — see `docs/pre-audit.md`'s
+"Addendum — Admin/Backend Key Separation for Production Deploy" for the plan. Not yet done.
 
 ---
 

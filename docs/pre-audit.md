@@ -1269,7 +1269,7 @@ When reveal was collapsed into `fulfillRandomRequest` (see the 2026-08-27 addend
 
 ## Addendum — Selfie Check Verification Gap in `FreeShipClaimSelfie` (2026-09-11)
 
-### SC-01 — Unverified `claimFreeShips` Path Left Open, Making Selfie-Check Gating Non-Enforcing
+~~### SC-01 — Unverified `claimFreeShips` Path Left Open, Making Selfie-Check Gating Non-Enforcing
 
 **File:** `contracts/FreeShipClaimSelfie.sol`
 **Severity:** Medium — deliberate, known, and explicitly deferred; not an oversight
@@ -1279,4 +1279,46 @@ When reveal was collapsed into `fulfillRandomRequest` (see the 2026-08-27 addend
 
 The original, fully unrestricted `claimFreeShips(uint16)` was deliberately left callable in this version, per explicit direction. That means the new verification machinery is not actually load-bearing yet: any caller can bypass Selfie Check entirely by calling the old function directly, exactly as before this contract existed. `FreeShipClaimSelfie` as it stands is infrastructure for the eventual gate, not the gate itself.
 
-**Not yet decided:** whether to eventually restrict or remove `claimFreeShips(uint16)` once the verified path is live and trusted, and if so, how to handle the resulting blast radius — the existing test suite (`test/Ships.test.ts`) calls `claimFreeShips` directly in numerous places and would need rework, and free-ship claiming would become hard-dependent on backend availability for the first time. Revisit before treating Selfie Check gating as an actual Sybil defense in the live product, not just a documented capability.
+**Not yet decided:** whether to eventually restrict or remove `claimFreeShips(uint16)` once the verified path is live and trusted, and if so, how to handle the resulting blast radius — the existing test suite (`test/Ships.test.ts`) calls `claimFreeShips` directly in numerous places and would need rework, and free-ship claiming would become hard-dependent on backend availability for the first time. Revisit before treating Selfie Check gating as an actual Sybil defense in the live product, not just a documented capability.~~
+
+**Resolved 2026-09-11 — the architecture this finding describes no longer exists.**
+`FreeShipClaimSelfie.sol` (the standalone "V2" contract with a separate `claimFreeShipsVerified`
+function coexisting with the original unrestricted one) was deleted entirely, per direction. The
+eligibility check was rebuilt directly into the *original* contracts instead — `FreeShipClaim.sol`'s
+own `claimFreeShips` and `TutorialClaim.sol`'s shared `_markTutorialCompleted` (called by both
+`completeTutorialWinPath`/`completeTutorialLossPath`) each check `eligibilityProvider` inline, with
+no separate parallel function. Confirmed by re-reading both files directly: there is exactly one
+entry point per claim type, not two. When no provider is wired (`address(0)`, today's default),
+both stay open — the same "not configured yet" pattern already used elsewhere in this repo (e.g.
+`FreeShipClaim.droneStorefront == address(0)`), not a gate with a bypass door. Once a real provider
+is wired, both are genuinely, fully gated with no alternate path — there is nothing left to bypass
+to. The "not yet decided" question above no longer applies in the form it was written; the one
+remaining real question is purely a deploy-readiness one, tracked in
+`docs/eth-global-remote-strategy-v2.md`'s Pick 2 section ("production deploy wiring doesn't exist
+yet").
+
+## Addendum — Admin/Backend Key Separation for Production Deploy (2026-09-11)
+
+`ignition/modules/DeployAndConfig.ts` currently reuses a small number of hardcoded addresses across
+many unrelated roles in the `PRODUCTION` branch:
+
+- `MAP_EDITOR` — the `transferOwnership` target for every `Ownable` contract in the module (map
+  editing, AI-encounter/node-graph editing, node-content publishing, *and* general contract
+  ownership for everything else, since there's no separate "owner" wallet from "map editor" today).
+- `FIREBASE_FLOW_MINTER` — authorized to mint ships directly (`Ships.setIsAllowedToCreateShips`)
+  from the Firebase Flow backend, and, as of this session, also authorized as the
+  `SelfieCheckEligibilityProvider` verifier (`setAuthorizedVerifier`) — one backend wallet now
+  covers two independent trust roles (minting ships vs. asserting a player passed Selfie Check).
+
+**This is a known, deliberate placeholder, not a final production layout.** Both addresses are
+today's dev-time convenience values — reusing one wallet for several roles is fine for testing but
+concentrates unrelated blast radii onto the same key once real value is at stake (e.g. the same
+compromised key that can relay a false Selfie Check verification could, if it's also
+`FIREBASE_FLOW_MINTER`, mint ships directly). The plan (per explicit direction) is to separate and
+replace **all** admin/backend keys with distinct, purpose-specific keys before a real production
+deploy — at minimum: a cold owner key (candidate: Ledger hardware signer, per the Uniswap-hook
+design discussion elsewhere in this repo's docs) separate from any hot backend-relay key, and each
+hot backend role (ship-minting, Selfie-Check verification, and any future backend-relayed role)
+either on its own key or deliberately consolidated with an explicit acknowledgment of the combined
+blast radius — not consolidated by default because no one has provisioned the separate keys yet.
+Not yet done; tracked here so it isn't mistaken for a finished decision.
