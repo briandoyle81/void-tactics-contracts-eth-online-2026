@@ -212,6 +212,12 @@ contract Lobbies is Ownable, ReentrancyGuard {
                 lobby.basic.creator = newCreator;
                 lobby.players.joiner = address(0);
                 lobby.state.status = LobbyStatus.Open;
+                // Clear any stale reservation — otherwise it can equal the
+                // lobby's own newly-promoted creator, and since joinLobby
+                // also blocks creator == msg.sender, that permanently
+                // bricks the lobby: no address, including the reserved one,
+                // could ever join it again (see docs/audit-2.md HA2-05).
+                lobby.players.reservedJoiner = address(0);
 
                 // Clear the promoted player's old joiner-side fleet, same
                 // as the joiner-leaves branch below does — otherwise a
@@ -242,6 +248,7 @@ contract Lobbies is Ownable, ReentrancyGuard {
                 _cleanupLobbyFromAllSets(_lobbyId);
                 lobby.players.joiner = address(0);
                 lobby.state.status = LobbyStatus.Open;
+                lobby.players.reservedJoiner = address(0);
                 emit LobbyAbandoned(_lobbyId, msg.sender);
             }
         } else {
@@ -254,6 +261,7 @@ contract Lobbies is Ownable, ReentrancyGuard {
 
             lobby.players.joiner = address(0);
             lobby.state.status = LobbyStatus.Open;
+            lobby.players.reservedJoiner = address(0);
 
             // Remove joiner from tracking and add lobby back to open set
             _removePlayerFromLobby(msg.sender, _lobbyId);
@@ -417,6 +425,14 @@ contract Lobbies is Ownable, ReentrancyGuard {
             revert InsufficientFee();
         }
 
+        // Clear the reservation once consumed (harmless no-op if it was
+        // never reserved) — acceptGame already does this; joinLobby is the
+        // other way a reserved joiner can actually join, and leaving it set
+        // here let the reservation permanently outlive this join, locking
+        // the lobby to this address even after they leave (see
+        // docs/audit-2.md HA2-05).
+        lobby.players.reservedJoiner = address(0);
+
         lobby.players.joiner = msg.sender;
         lobby.state.status = LobbyStatus.FleetSelection;
         lobby.players.joinedAt = block.timestamp;
@@ -527,6 +543,7 @@ contract Lobbies is Ownable, ReentrancyGuard {
         lobby.state.status = LobbyStatus.Open;
         lobby.players.creatorFleetId = 0;
         lobby.players.joinerFleetId = 0;
+        lobby.players.reservedJoiner = address(0);
 
         emit LobbyReset(_lobbyId, lobby.basic.creator);
     }
@@ -683,6 +700,7 @@ contract Lobbies is Ownable, ReentrancyGuard {
         lobby.state.status = LobbyStatus.Open;
         lobby.players.creatorFleetId = 0;
         lobby.players.joinerFleetId = 0;
+        lobby.players.reservedJoiner = address(0);
 
         emit LobbyTerminated(_lobbyId);
     }

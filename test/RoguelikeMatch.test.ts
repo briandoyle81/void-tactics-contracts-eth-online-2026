@@ -1153,6 +1153,50 @@ describe("RoguelikeMatch / RoguelikeResupply / RoguelikeNodeMap", function () {
     });
   });
 
+  describe("Detached currentNodeId via enterResupplyNode during combat (HA2-04)", function () {
+    // Before the fix, enterResupplyNode never checked run.activeGameId, so a
+    // player could enter a resupply node while a combat match at the
+    // current node was still unresolved -- detaching run.currentNodeId
+    // from the node actually being fought. The eventual onGameEnded
+    // callback only checks *which game*, not *which node*, so it would
+    // credit the wrong (resupply) node as defeated and evaluate
+    // win-effects/isFinalNode against it instead of the real fight.
+    it("reverts enterResupplyNode while a combat match is still active at the current node", async function () {
+      const { deployed, human, humanRoguelikeMatch } = await loadFixture(
+        deployFixture,
+      );
+      const { maps, aiEncounters, roguelikeNodeMap, ships, randomManager } =
+        deployed;
+      const { campaignId, rootNodeId } = await setupCampaignWithRoot(
+        roguelikeNodeMap,
+        maps,
+        aiEncounters,
+      );
+      const resupplyNode = await createResupplyNode(roguelikeNodeMap, campaignId);
+      await roguelikeNodeMap.write.addChild([rootNodeId, resupplyNode, false]);
+
+      await purchaseAndConstructHumanShips(ships, randomManager, human);
+      await humanRoguelikeMatch.write.startRun([campaignId, [1n]]);
+      await humanRoguelikeMatch.write.enterCombatNode([
+        rootNodeId,
+        [{ row: 0, col: 0 }],
+      ]);
+
+      // Without resolving the just-started combat game, try to advance to
+      // the resupply node.
+      await expect(
+        humanRoguelikeMatch.write.enterResupplyNode([resupplyNode]),
+      ).to.be.rejectedWith("ActiveGameInProgress");
+
+      // run.currentNodeId must still be the combat node, not the resupply
+      // node -- confirms the state was never detached.
+      const run = await deployed.roguelikeRun.read.getRun([
+        human.account.address,
+      ]);
+      expect(run.currentNodeId).to.equal(rootNodeId);
+    });
+  });
+
   describe("Resupply: repair", function () {
     it("full-heals listed ships and charges UTC proportional to missing HP", async function () {
       const { deployed, owner, human, humanRoguelikeMatch, humanRoguelikeResupply, otherRoguelikeMatch, humanGame, humanUniversalCredits } =

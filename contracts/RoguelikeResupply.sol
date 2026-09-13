@@ -35,6 +35,7 @@ contract RoguelikeResupply is Ownable {
     error ShipAlreadyInFleet();
     error WrongCampaignVariant();
     error InsufficientFunds(uint required, uint available);
+    error ActiveGameInProgress();
 
     event ResupplyRepaired(address indexed player, uint shipCount, uint cost);
     event RosterModified(
@@ -102,6 +103,12 @@ contract RoguelikeResupply is Ownable {
         Run memory _run
     ) internal view returns (RoguelikeNode memory node) {
         if (_run.status != RunStatus.Active) revert NoActiveRun();
+        // Same guard as RoguelikeMatch.enterResupplyNode/retreatRun(0) — a
+        // combat match still live at the current node means
+        // _run.currentNodeId hasn't actually been resolved yet, so acting
+        // on "the resupply node" here would be acting on stale/wrong state
+        // once that game resolves (see docs/audit-2.md HA2-04).
+        if (_run.activeGameId != 0) revert ActiveGameInProgress();
         node = nodeMap.getNode(_run.currentNodeId);
         if (node.kind != RoguelikeNodeKind.Resupply) revert NotResupplyNode();
     }

@@ -59,6 +59,27 @@ contract UTCLotteryHook is BaseHook, Ownable {
     // cheap. Owner-configurable; defaults to 0.01 ETH.
     uint256 public minEntryThresholdWei = 0.01 ether;
 
+    // Ceiling on how much weight a single qualifying sell can credit toward
+    // one address's entry, independent of the real (uncapped) ETH proceeds
+    // — bounds how much a single trade (flash-loaned or genuinely funded)
+    // can inflate one address's odds (see docs/audit-2.md HA2-06). Only
+    // caps recorded *weight*; the qualifying-threshold check above still
+    // uses the real, uncapped proceeds. Owner-configurable; defaults to
+    // 100x minEntryThresholdWei's default.
+    uint256 public maxWeightPerEntryWei = 1 ether;
+
+    // Floors resolveDraw's random-pick denominator at
+    // maxWinProbabilityDenominator * maxWeightPerEntryWei, so no single
+    // address's (already-capped) weight can ever exceed a
+    // 1/maxWinProbabilityDenominator share of a draw — regardless of how
+    // few other participants show up. A random pick landing beyond the
+    // real participants' cumulative weight means nobody wins that specific
+    // draw (see DrawResolvedNoWinner below); the next qualifying sell just
+    // starts accumulating toward the next draw as usual, no special
+    // "rollover" needed. Owner-configurable; defaults to 10 (never better
+    // than a 1-in-10 chance).
+    uint256 public maxWinProbabilityDenominator = 10;
+
     // A draw only starts once ALL of these hold: at least drawInterval has
     // elapsed since the last draw started, AND the draw has accumulated at
     // least minParticipants distinct qualifying sellers, AND at least
@@ -137,6 +158,7 @@ contract UTCLotteryHook is BaseHook, Ownable {
     );
     event DrawStarted(uint256 indexed drawId, uint256 requestId, uint256 totalWeight);
     event DrawResolved(uint256 indexed drawId, address indexed winner);
+    event DrawResolvedNoWinner(uint256 indexed drawId);
     event PrizeQueued(uint256 indexed queueIndex);
     event PrizeQueueCleared();
 
@@ -192,10 +214,23 @@ contract UTCLotteryHook is BaseHook, Ownable {
     }
 
     function _beforeInitialize(
-        address,
+        address sender,
         PoolKey calldata key,
         uint160
     ) internal override returns (bytes4) {
+        // `sender` is the real, original caller of PoolManager.initialize()
+        // (PoolManager.initialize forwards its own msg.sender here — see
+        // Hooks.beforeInitialize in @uniswap/v4-core), NOT this contract's
+        // own msg.sender (which would be PoolManager itself, since it calls
+        // the hook directly). Without this check, PoolManager.initialize is
+        // fully permissionless on the real network, so any third party who
+        // notices this hook deployed (before this project's own deploy
+        // script gets to call initialize) could permanently lock it to a
+        // bogus, liquidity-free pool with no on-chain recovery — see
+        // docs/audit-2.md HA2-02. Reuses Ownable's own error for
+        // consistency with every other access-control revert in this
+        // contract.
+        if (sender != owner()) revert OwnableUnauthorizedAccount(sender);
         if (poolLocked) {
             revert PoolAlreadyLocked();
         }
@@ -278,6 +313,16 @@ contract UTCLotteryHook is BaseHook, Ownable {
             drawParticipants[drawId].push(_player);
         }
 
+        // Weight actually credited toward lottery odds is capped at
+        // maxWeightPerEntryWei, independent of the real (uncapped)
+        // ethProceeds reported in the event below — see docs/audit-2.md
+        // HA2-06. Bounds how much a single sell (flash-loaned or genuine)
+        // can inflate one address's odds; the qualifying-threshold check
+        // above already ran against the real, uncapped proceeds.
+        uint256 cappedProceeds = ethProceeds > maxWeightPerEntryWei
+            ? maxWeightPerEntryWei
+            : ethProceeds;
+
         // Ticket size is the player's single best qualifying sell in the
         // draw, not a running sum — a newer, higher-value sell replaces it;
         // a newer but lower (or equal) one leaves the existing ticket alone.
@@ -285,12 +330,12 @@ contract UTCLotteryHook is BaseHook, Ownable {
         // by splitting one large sell into many smaller ones instead of one
         // trade actually being bigger.
         uint256 previousWeight = weightInDraw[drawId][_player];
-        if (ethProceeds > previousWeight) {
+        if (cappedProceeds > previousWeight) {
             totalWeightInDraw[drawId] =
                 totalWeightInDraw[drawId] -
                 previousWeight +
-                ethProceeds;
-            weightInDraw[drawId][_player] = ethProceeds;
+                cappedProceeds;
+            weightInDraw[drawId][_player] = cappedProceeds;
         }
 
         emit SellRecorded(drawId, _player, ethProceeds, weightInDraw[drawId][_player]);
@@ -338,7 +383,28 @@ contract UTCLotteryHook is BaseHook, Ownable {
         }
 
         uint64 randomness = randomManager.fulfillRandomRequest(requestId);
-        uint256 target = uint256(randomness) % totalWeight;
+
+        // Floors the pick's denominator so no single address's (already
+        // capped, see _recordSell) weight can ever exceed a
+        // 1/maxWinProbabilityDenominator share of this draw, regardless of
+        // how thin real participation is (see docs/audit-2.md HA2-06). A
+        // target landing beyond the real participants' cumulative weight
+        // (only possible when real weight is thin relative to the floor)
+        // means nobody wins this draw — the next qualifying sell simply
+        // starts accumulating toward the next draw as usual.
+        uint256 effectiveTotalWeight = maxWinProbabilityDenominator *
+            maxWeightPerEntryWei;
+        if (totalWeight > effectiveTotalWeight) {
+            effectiveTotalWeight = totalWeight;
+        }
+        uint256 target = uint256(randomness) % effectiveTotalWeight;
+
+        drawResolved[_drawId] = true;
+
+        if (target >= totalWeight) {
+            emit DrawResolvedNoWinner(_drawId);
+            return;
+        }
 
         address winner = participants[participants.length - 1];
         uint256 cumulative;
@@ -349,8 +415,6 @@ contract UTCLotteryHook is BaseHook, Ownable {
                 break;
             }
         }
-
-        drawResolved[_drawId] = true;
 
         if (queueTail > queueHead) {
             PrizeTemplate memory t = prizeQueue[queueHead];
@@ -429,6 +493,14 @@ contract UTCLotteryHook is BaseHook, Ownable {
 
     function setMinTotalWeightWei(uint256 _minTotalWeightWei) external onlyOwner {
         minTotalWeightWei = _minTotalWeightWei;
+    }
+
+    function setMaxWeightPerEntryWei(uint256 _maxWeightPerEntryWei) external onlyOwner {
+        maxWeightPerEntryWei = _maxWeightPerEntryWei;
+    }
+
+    function setMaxWinProbabilityDenominator(uint256 _maxWinProbabilityDenominator) external onlyOwner {
+        maxWinProbabilityDenominator = _maxWinProbabilityDenominator;
     }
 
     // Appends one hand-crafted template to the back of the queue (FIFO —

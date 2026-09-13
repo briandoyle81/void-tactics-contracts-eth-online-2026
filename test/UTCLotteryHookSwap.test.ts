@@ -1,7 +1,13 @@
 import { expect } from "chai";
 import { loadFixture } from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
 import hre from "hardhat";
-import { getAddress, parseEther, zeroAddress, encodeAbiParameters } from "viem";
+import {
+  getAddress,
+  parseEther,
+  zeroAddress,
+  encodeAbiParameters,
+  toFunctionSelector,
+} from "viem";
 import DeployModule from "../ignition/modules/DeployAndConfig";
 import { mineHookAddress, HOOK_FLAGS } from "../scripts/hookMiner";
 
@@ -155,6 +161,36 @@ describe("UTCLotteryHook — real swap integration", function () {
     await poolManager.write.initialize([key, SQRT_PRICE_1_1]);
 
     expect(await hook.read.poolLocked()).to.equal(true);
+  });
+
+  it("rejects a non-owner calling PoolManager.initialize on this hook's pool (HA2-02)", async function () {
+    const { poolManager, key, hook, trader } = await loadFixture(deployFixture);
+
+    // PoolManager.initialize is itself permissionless -- anyone can call it
+    // for any PoolKey. Without the owner check, this would permanently lock
+    // the hook to whichever caller gets there first. Here `trader` (not the
+    // hook's owner) tries it directly.
+    const poolManagerAsTrader = await hre.viem.getContractAt(
+      "PoolManager",
+      poolManager.address,
+      { client: { wallet: trader } },
+    );
+
+    // Uniswap wraps a reverting hook's error in its own WrappedError(...)
+    // (see @uniswap/v4-core's CustomRevert/Hooks.sol: bubbleUpAndRevertWith),
+    // so a plain string match against "OwnableUnauthorizedAccount" won't be
+    // found in the bubbled-up message -- the raw error selector IS present
+    // in the wrapped revert data (confirmed manually), so assert on that
+    // instead of the (unreadable, wrapped) decoded name.
+    const ownableUnauthorizedSelector = toFunctionSelector(
+      "OwnableUnauthorizedAccount(address)",
+    ).slice(2);
+
+    await expect(
+      poolManagerAsTrader.write.initialize([key, SQRT_PRICE_1_1]),
+    ).to.be.rejectedWith(ownableUnauthorizedSelector);
+
+    expect(await hook.read.poolLocked()).to.equal(false);
   });
 
   it("records a qualifying sell from a real swap, crediting the trader named in hookData", async function () {
@@ -327,6 +363,13 @@ describe("UTCLotteryHook — real swap integration", function () {
       expect(await hook.read.minTotalWeightWei()).to.equal(0n);
     });
 
+    // HA2-06 (docs/audit-2.md)
+    it("defaults: maxWeightPerEntryWei 1 ETH, maxWinProbabilityDenominator 10", async function () {
+      const { hook } = await loadFixture(deployFixture);
+      expect(await hook.read.maxWeightPerEntryWei()).to.equal(parseEther("1"));
+      expect(await hook.read.maxWinProbabilityDenominator()).to.equal(10n);
+    });
+
     it("drawInterval/minParticipants/minTotalWeightWei setters are owner-only", async function () {
       const { hook, trader } = await loadFixture(deployFixture);
       const asTrader = await hre.viem.getContractAt(
@@ -343,6 +386,58 @@ describe("UTCLotteryHook — real swap integration", function () {
       await expect(
         asTrader.write.setMinTotalWeightWei([1n]),
       ).to.be.rejectedWith("OwnableUnauthorizedAccount");
+    });
+
+    // HA2-06 (docs/audit-2.md)
+    it("maxWeightPerEntryWei/maxWinProbabilityDenominator setters are owner-only", async function () {
+      const { hook, trader } = await loadFixture(deployFixture);
+      const asTrader = await hre.viem.getContractAt(
+        "UTCLotteryHook",
+        hook.address,
+        { client: { wallet: trader } },
+      );
+      await expect(
+        asTrader.write.setMaxWeightPerEntryWei([1n]),
+      ).to.be.rejectedWith("OwnableUnauthorizedAccount");
+      await expect(
+        asTrader.write.setMaxWinProbabilityDenominator([1n]),
+      ).to.be.rejectedWith("OwnableUnauthorizedAccount");
+    });
+
+    // HA2-06 (docs/audit-2.md): a single sell's *recorded weight* is capped
+    // at maxWeightPerEntryWei even when its real, uncapped proceeds
+    // (reported separately in the SellRecorded event) are much higher —
+    // bounds how much one trade (flash-loaned or genuine) can inflate one
+    // address's odds.
+    it("caps recorded weight at maxWeightPerEntryWei, independent of real (uncapped) sell proceeds", async function () {
+      const fixture = await loadFixture(deployFixture);
+      const { hookAsOwner, hook, liquidityRouter, key, lp, trader } = fixture;
+      await setUpPoolAndLiquidity(fixture);
+      // Deep liquidity so a real, large sell doesn't itself get starved by
+      // slippage down near the cap -- this test needs proceeds to clearly
+      // exceed the cap to prove clamping actually happened.
+      await liquidityRouter.write.modifyLiquidity(
+        [
+          key,
+          {
+            tickLower: MIN_USABLE_TICK,
+            tickUpper: MAX_USABLE_TICK,
+            liquidityDelta: parseEther("1000"),
+            salt: `0x${"1".repeat(64)}`,
+          },
+          "0x",
+        ],
+        { account: lp.account, value: parseEther("2000") },
+      );
+      await hookAsOwner.write.setMaxWeightPerEntryWei([parseEther("2")]);
+      const sellAs = makeSellAs(fixture);
+
+      // A real sell whose actual proceeds are well above the 2 ETH cap.
+      await sellAs(trader, parseEther("50"));
+
+      const weight = await hook.read.weightInDraw([0n, trader.account.address]);
+      expect(weight).to.equal(parseEther("2"));
+      expect(await hook.read.totalWeightInDraw([0n])).to.equal(parseEther("2"));
     });
 
     it("does not start a draw with fewer than minParticipants sellers, and keeps running (no reset) until a 3rd distinct seller shows up — even past drawInterval", async function () {
@@ -406,6 +501,11 @@ describe("UTCLotteryHook — real swap integration", function () {
         { account: lp.account, value: parseEther("2000") },
       );
       await hookAsOwner.write.setMinTotalWeightWei([parseEther("5")]);
+      // This test is about minTotalWeightWei gating specifically, not the
+      // HA2-06 per-entry weight cap (default 1 ETH) — raise the cap so the
+      // "big sell" below isn't itself clamped below the 5 ETH bar it's
+      // meant to cross.
+      await hookAsOwner.write.setMaxWeightPerEntryWei([parseEther("20")]);
       const sellAs = makeSellAs(fixture);
 
       // Three small sells, each just over minEntryThresholdWei (0.01 ETH)
@@ -442,6 +542,70 @@ describe("UTCLotteryHook — real swap integration", function () {
 
       await sellAs(trader);
       expect(await hook.read.currentDrawId()).to.equal(1n);
+    });
+
+    // HA2-06 (docs/audit-2.md): with maxWinProbabilityDenominator set very
+    // high relative to maxWeightPerEntryWei, resolveDraw's effective
+    // denominator (maxWinProbabilityDenominator * maxWeightPerEntryWei)
+    // vastly exceeds RandomManager's uint64 randomness range — once that
+    // product exceeds 2^64, the modulo becomes a no-op, so the "phantom
+    // zone" probability is bounded by 1 - totalWeight/2^64, not by how
+    // extreme these parameters get. With tiny real weight (three sells
+    // just clearing minEntryThresholdWei), that ceiling is ~99.8% per
+    // attempt. Two independent attempts drive the chance that *both*
+    // happen to land on a real winner down to roughly (0.2%)^2 ~= 4e-6 —
+    // an acceptable, disclosed residual flake probability for a genuinely
+    // random on-chain outcome, not a design flaw.
+    it("resolves with no winner when the random pick lands in the probability-cap's phantom zone", async function () {
+      const fixture = await loadFixture(deployFixture);
+      const { hookAsOwner, hook, ships, trader, trader2, trader3 } = fixture;
+      await setUpPoolAndLiquidity(fixture);
+      await hookAsOwner.write.setMaxWinProbabilityDenominator([
+        10n ** 15n,
+      ]);
+      const sellAs = makeSellAs(fixture);
+      const sellers = [trader, trader2, trader3];
+
+      let sawNoWinner = false;
+      for (let attempt = 0; attempt < 2 && !sawNoWinner; attempt++) {
+        for (const seller of sellers) {
+          await sellAs(seller, parseEther("0.02"));
+        }
+        await hre.network.provider.send("evm_increaseTime", [
+          24 * 60 * 60 + 1,
+        ]);
+        await hre.network.provider.send("evm_mine");
+        await sellAs(trader, parseEther("0.02"));
+
+        const drawId = BigInt(attempt);
+        expect(await hook.read.currentDrawId()).to.equal(drawId + 1n);
+
+        const shipCountsBefore = await Promise.all(
+          sellers.map((s) => ships.read.getShipIdsOwned([s.account.address])),
+        );
+
+        await hre.network.provider.send("evm_mine");
+        await hook.write.resolveDraw([drawId]);
+        expect(await hook.read.drawResolved([drawId])).to.equal(true);
+
+        const noWinnerEvents = await hook.getEvents.DrawResolvedNoWinner();
+        const thisAttemptNoWinner = noWinnerEvents.some(
+          (e: any) => e.args.drawId === drawId,
+        );
+
+        const shipCountsAfter = await Promise.all(
+          sellers.map((s) => ships.read.getShipIdsOwned([s.account.address])),
+        );
+        const anyoneWon = shipCountsAfter.some(
+          (after, i) => after.length > shipCountsBefore[i].length,
+        );
+
+        // The event and the ship-count observation must always agree.
+        expect(thisAttemptNoWinner).to.equal(!anyoneWon);
+        sawNoWinner = thisAttemptNoWinner;
+      }
+
+      expect(sawNoWinner).to.equal(true);
     });
   });
 
@@ -522,9 +686,26 @@ describe("UTCLotteryHook — real swap integration", function () {
   async function runFullDrawCycle(
     fixture: Awaited<ReturnType<typeof deployFixture>>,
   ): Promise<`0x${string}`> {
-    const { hook, ships, trader, trader2, trader3 } = fixture;
+    const { hook, hookAsOwner, ships, trader, trader2, trader3 } = fixture;
     const sellers = [trader, trader2, trader3];
     const sellAs = makeSellAs(fixture);
+
+    // This helper tests the prize-minting flow, not the HA2-06
+    // no-winner/probability-cap mechanic — neutralize it deterministically,
+    // independent of this pool's actual slippage-affected sell proceeds.
+    // With the cap set to exactly minEntryThresholdWei, every qualifying
+    // sell (by definition >= that threshold) clamps to the same value, so
+    // totalWeight for N sellers is always exactly N * cap; with K=1,
+    // effectiveTotalWeight = max(N*cap, 1*cap) = N*cap = totalWeight
+    // exactly, for any N >= 1 — zero phantom ("no winner") zone,
+    // deterministically. (K=1 alone isn't enough here: this fixture's pool
+    // is thin enough that real per-sell proceeds land under the *default*
+    // 1 ETH cap already, so effectiveTotalWeight would still be floored
+    // above the real total without also lowering the cap itself.)
+    await hookAsOwner.write.setMaxWeightPerEntryWei([
+      await hook.read.minEntryThresholdWei(),
+    ]);
+    await hookAsOwner.write.setMaxWinProbabilityDenominator([1n]);
 
     for (const seller of sellers) {
       await sellAs(seller);

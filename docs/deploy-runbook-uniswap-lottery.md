@@ -126,10 +126,15 @@ Only run this after Phase 1 is live and you've confirmed
 
 ### 2.1 Preconditions
 
-- [ ] `.env` has `SHIP_MINTER_PRIVATE_KEY` set (see 1.1) — if it doesn't match
-      `Ships.owner()` after Phase 1's handover, the script will print calldata
-      for manual submission instead of failing outright, but confirm which
-      case you're in before running.
+- [ ] `.env` has `SHIP_MINTER_PRIVATE_KEY` set (see 1.1) — **this is now a hard
+      requirement, not just nice-to-have.** As of the HA2-02 fix (2026-09-12),
+      `PoolManager.initialize` is owner-gated on the hook, so this key must
+      also match `hookOwnerAddress` (defaults to `MAP_EDITOR`, same as
+      `Ships.owner()` after Phase 1's handover) for the script to complete
+      Phase 2 in one run. If it doesn't match either, the script prints
+      calldata for manual submission and halts at whichever step needs it —
+      the ship-minting grant is safely skippable, but pool-initialize is not
+      (everything after it depends on the pool existing).
 - [ ] Deploy wallet (`METAMASK_WALLET_1`) funded with enough Base Sepolia ETH
       to cover: hook-deploy gas (~12KB contract, budget generously), the
       LP-seed spend (~2x its ETH-equivalent value — see the script's header
@@ -155,10 +160,12 @@ Mines a CREATE2 salt against the real canonical deployment proxy, deploys
 `UTCLotteryHook`, computes an initial pool price from `ShipPurchaser`'s live
 mint rate, sources LP-seed UC via `purchaseUTCWithFlow`, initializes the real
 Uniswap v4 pool (**the one genuinely irreversible step** — see the script's
-header comment for why that's not treated as high-ceremony right now), adds
-liquidity, grants the hook `Ships.setIsAllowedToCreateShips`, and runs one
-real smoke-test sell swap — verified via both the decoded `SellRecorded` event
-and a direct state read before the script declares success.
+header comment for why that's not treated as high-ceremony right now; also
+now owner-gated on the hook itself per the HA2-02 fix, and sent from
+`shipMinterClient` rather than the general deploy wallet), adds liquidity,
+grants the hook `Ships.setIsAllowedToCreateShips`, and runs one real
+smoke-test sell swap — verified via both the decoded `SellRecorded` event and
+a direct state read before the script declares success.
 
 ### 2.4 If something goes wrong
 
@@ -171,6 +178,13 @@ and a direct state read before the script declares success.
   match `Ships.owner()`. Submit the printed `to`/`data` from whichever wallet
   actually holds owner rights (e.g. via Basescan's "Write Contract" using raw
   calldata, or a separately-keyed script run).
+- **Script throws with a printed `initialize` calldata instead of completing:**
+  `SHIP_MINTER_PRIVATE_KEY` didn't match `hookOwnerAddress` — unlike the grant
+  above, this step can't be skipped (liquidity/smoke-test all depend on the
+  pool existing), so the script halts here on purpose. Submit the printed
+  `to`/`data` from the hook's actual owner wallet, then **re-run the whole
+  script** — it's idempotent, so it'll skip everything already done and pick
+  up at liquidity-adding.
 - **Smoke test fails to find a `SellRecorded` event:** don't assume the pool
   is broken — check `hook.minEntryThresholdWei()` against what the script
   computed the smoke-test sell size from; a large price move between the

@@ -246,6 +246,15 @@ contract RoguelikeMatch is Ownable, IGameOrchestrator {
     function enterResupplyNode(uint _targetNodeId) external {
         Run memory run = runLedger.getRun(msg.sender);
         if (run.status != RunStatus.Active) revert NoActiveRun();
+        // Can't advance to a resupply node while a combat match is still
+        // live at the current node — that would detach run.currentNodeId
+        // from the node actually being fought, so the eventual
+        // onGameEnded callback (which only checks *which game*, not *which
+        // node*) would credit the wrong node as defeated and evaluate
+        // win-effects/isFinalNode against it instead. Same guard
+        // retreatRun(0) already has, for the same underlying reason (see
+        // docs/pre-audit.md SP-04) — see docs/audit-2.md HA2-04.
+        if (run.activeGameId != 0) revert ActiveGameInProgress();
         RoguelikeNode memory node = _commitToNode(msg.sender, run, _targetNodeId);
         if (node.kind != RoguelikeNodeKind.Resupply) revert WrongNodeKind();
 

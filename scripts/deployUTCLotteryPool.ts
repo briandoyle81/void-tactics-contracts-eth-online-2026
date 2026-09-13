@@ -570,15 +570,44 @@ async function main() {
     }
   } else {
     console.log("PoolKey:", key, "sqrtPriceX96:", sqrtPriceX96.toString());
+
+    // PoolManager.initialize is permissionless on the real network, but
+    // UTCLotteryHook._beforeInitialize is now owner-gated (HA2-02) -- the
+    // call must come from the hook's own owner, not just any wallet. Check
+    // independently here rather than assuming shipMinterClient (verified
+    // against Ships.owner() in step 3) also matches this hook's owner --
+    // they default to the same MAP_EDITOR address but aren't guaranteed to.
+    if (
+      !shipMinterClient ||
+      getAddress(shipMinterClient.account!.address) !== hookOwnerAddress
+    ) {
+      const initializeCalldata = encodeFunctionData({
+        abi: poolManagerAbi,
+        functionName: "initialize",
+        args: [key, sqrtPriceX96],
+      });
+      console.log(
+        "MANUAL STEP REQUIRED -- no available wallet matches this hook's owner " +
+          `(${hookOwnerAddress}). PoolManager.initialize is owner-gated on this hook ` +
+          "(docs/audit-2.md HA2-02) and must be submitted from that wallet. Submit this, " +
+          "then re-run this script to continue:",
+      );
+      console.log("  to:  ", POOL_MANAGER);
+      console.log("  data:", initializeCalldata);
+      throw new Error(
+        "Cannot initialize the pool automatically -- see the manual-step instructions above.",
+      );
+    }
+
     const { request, result: resultingTick } = await publicClient.simulateContract({
       address: POOL_MANAGER,
       abi: poolManagerAbi,
       functionName: "initialize",
       args: [key, sqrtPriceX96],
-      account: wallet.account,
+      account: shipMinterClient.account,
     });
     console.log("Simulated pool initialize OK. Resulting tick:", resultingTick);
-    const hash = await wallet.writeContract(request);
+    const hash = await shipMinterClient.writeContract(request);
     console.log("Pool initialize tx:", hash);
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") {

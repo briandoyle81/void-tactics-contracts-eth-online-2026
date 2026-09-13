@@ -261,6 +261,63 @@ describe("Tournament", function () {
     });
   });
 
+  describe("Bracket shuffle expiry (HA2-07)", function () {
+    it("rejects buildBracket once the reveal window has expired", async function () {
+      const { asOwner, asAlice, asBob, now } = await loadFixture(
+        deployTournamentFixture
+      );
+      await asOwner.write.createTournament([defaultConfig(now)]);
+      await asAlice.write.register([1n, 0n, 1n, EMPTY_PROOF], {
+        value: parseEther("1"),
+      });
+      await asBob.write.register([1n, 0n, 2n, EMPTY_PROOF], {
+        value: parseEther("1"),
+      });
+      await increaseTime(3601);
+      await asOwner.write.start([1n]);
+
+      // SHUFFLE_REVEAL_WINDOW is 10 minutes; let it lapse unused.
+      await increaseTime(601);
+
+      await expect(asOwner.write.buildBracket([1n])).to.be.rejectedWith(
+        "ShuffleWindowExpired"
+      );
+    });
+
+    it("lets anyone reroll an expired shuffle request and build normally afterward", async function () {
+      const { asOwner, asAlice, asBob, now } = await loadFixture(
+        deployTournamentFixture
+      );
+      await asOwner.write.createTournament([defaultConfig(now)]);
+      await asAlice.write.register([1n, 0n, 1n, EMPTY_PROOF], {
+        value: parseEther("1"),
+      });
+      await asBob.write.register([1n, 0n, 2n, EMPTY_PROOF], {
+        value: parseEther("1"),
+      });
+      await increaseTime(3601);
+      await asOwner.write.start([1n]);
+
+      // Rerolling before expiry is rejected.
+      await expect(
+        asOwner.write.rerollBracketShuffle([1n])
+      ).to.be.rejectedWith("ShuffleWindowNotExpired");
+
+      await increaseTime(601);
+
+      // Permissionless: alice (not the tournament creator) can force it.
+      await asAlice.write.rerollBracketShuffle([1n]);
+
+      // The old request's window expired, but the reroll opened a fresh
+      // one, so buildBracket() succeeds immediately again.
+      await hre.network.provider.send("evm_mine");
+      await asOwner.write.buildBracket([1n]);
+
+      const bracket = await asOwner.read.getBracket([1n]);
+      expect(bracket.length).to.equal(1);
+    });
+  });
+
   describe("Bracket seeding & byes", function () {
     it("pads to a power of two and auto-advances byes to top seeds", async function () {
       const { asOwner, asAlice, asBob, asCarol, alice, bob, carol, now } =

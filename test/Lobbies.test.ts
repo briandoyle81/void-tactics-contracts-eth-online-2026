@@ -2326,6 +2326,78 @@ describe("Lobbies", function () {
         ])
       ).to.be.rejected;
     });
+
+    // Shared setup for the HA2-05 tests below: creator reserves lobby 1 for
+    // joiner and joiner actually joins via plain joinLobby (not acceptGame,
+    // which already correctly clears the reservation).
+    async function createAndJoinReservedLobby(fixture: any) {
+      const { creatorLobbies, joinerLobbies, joiner, universalCredits, shipPurchaser, creator, lobbies, owner } = fixture;
+      const ownerLobbies = await hre.viem.getContractAt(
+        "Lobbies",
+        lobbies.address,
+        { client: { wallet: owner } }
+      );
+      await ownerLobbies.write.setUniversalCreditsAddress([
+        universalCredits.address,
+      ]);
+      await shipPurchaser.write.purchaseUTCWithFlow(
+        [creator.account.address, 1n],
+        { value: parseEther("9.99"), account: creator.account }
+      );
+      await universalCredits.write.approve([lobbies.address, parseEther("1")], {
+        account: creator.account,
+      });
+      await creatorLobbies.write.createLobby([
+        1000n,
+        300n,
+        true,
+        0n,
+        100n,
+        joiner.account.address,
+      ]);
+      await joinerLobbies.write.joinLobby([1n]);
+    }
+
+    // HA2-05 (docs/audit-2.md): reservedJoiner was never cleared outside
+    // acceptGame/rejectGame, so a reserved player who joined via plain
+    // joinLobby and then left could permanently lock the lobby to
+    // themselves -- nobody else, including the original creator re-inviting
+    // someone new, could ever join it again.
+    it("clears reservedJoiner when the reserved player joins then leaves, letting anyone else join (HA2-05)", async function () {
+      const fixture = await loadFixture(deployLobbiesFixture);
+      const { joinerLobbies, otherLobbies, creatorLobbies } = fixture;
+      await createAndJoinReservedLobby(fixture);
+
+      await joinerLobbies.write.leaveLobby([1n]);
+
+      const lobby = await creatorLobbies.read.getLobby([1n]);
+      expect(lobby.players.reservedJoiner).to.equal(zeroAddress);
+
+      // A completely different, never-invited address can now join.
+      await expect(otherLobbies.write.joinLobby([1n])).to.not.be.rejected;
+    });
+
+    // Worse variant: if the *creator* is the one who leaves after the
+    // reserved player joined, that player gets promoted to creator -- if
+    // reservedJoiner still equaled them, joinLobby's own creator==msg.sender
+    // guard would make the lobby permanently unjoinable by anyone, forever.
+    it("clears reservedJoiner when the creator leaves and the reserved player is promoted, so the lobby isn't permanently bricked (HA2-05)", async function () {
+      const fixture = await loadFixture(deployLobbiesFixture);
+      const { creatorLobbies, otherLobbies, joiner } = fixture;
+      await createAndJoinReservedLobby(fixture);
+
+      await creatorLobbies.write.leaveLobby([1n]);
+
+      const lobby = await creatorLobbies.read.getLobby([1n]);
+      expect(lobby.basic.creator.toLowerCase()).to.equal(
+        joiner.account.address.toLowerCase(),
+      );
+      expect(lobby.players.reservedJoiner).to.equal(zeroAddress);
+
+      // A third party can join the now-Bob-owned lobby -- it isn't
+      // permanently dead.
+      await expect(otherLobbies.write.joinLobby([1n])).to.not.be.rejected;
+    });
   });
 
   describe("Stale lobby pruning (GR-03)", function () {

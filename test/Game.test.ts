@@ -3247,6 +3247,72 @@ describe("Game", function () {
       expect(creatorTookDamage || joinerTookDamage).to.be.true;
     });
 
+    it("rejects shooting a ship that was never placed in this game (HA2-01)", async function () {
+      const { creatorLobbies, joinerLobbies, creator, joiner, ships, game, randomManager } =
+        await loadFixture(deployGameFixture);
+
+      // Purchase and construct ships for both players — tier 0 mints 5
+      // ships per purchase, so joiner ends up with ships 6-10; only ship 6
+      // is placed into the fleet below, leaving 7-10 real, joiner-owned,
+      // constructed ships that were never part of this (or any) game.
+      await ships.write.purchaseWithFlow(
+        [creator.account.address, 0n, joiner.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      await ships.write.purchaseWithFlow(
+        [joiner.account.address, 0n, creator.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+
+      const totalShipCount = Number(await ships.read.shipCount());
+      for (let i = 1; i <= totalShipCount; i++) {
+        const shipTuple = (await ships.read.ships([BigInt(i)])) as ShipTuple;
+        const ship = tupleToShip(shipTuple);
+        await randomManager.write.revealRandomness([ship.traits.serialNumber]);
+      }
+      await ships.write.constructAllMyShips({ account: creator.account });
+      await ships.write.constructAllMyShips({ account: joiner.account });
+
+      await creatorLobbies.write.createLobby([
+        1000n,
+        300n,
+        true,
+        0n, // selectedMapId - no preset map,
+        100n, // maxScore
+        zeroAddress, // reservedJoiner - no reservation
+      ]);
+      await joinerLobbies.write.joinLobby([1n]);
+
+      await creatorLobbies.write.createFleet([
+        1n,
+        [1n],
+        generateStartingPositions([1n], true),
+      ]);
+      await joinerLobbies.write.createFleet([
+        1n,
+        [6n],
+        generateStartingPositions([6n], false),
+      ]);
+
+      const gameData = (await game.read.getGame([
+        1n,
+      ])) as unknown as GameDataView;
+      const creatorPos = findShipPosition(gameData, 1n);
+
+      // Ship 7 exists, is owned by joiner (a different owner than the
+      // shooter, so it clears that check), and was never placed in game 1
+      // at all — before HA2-01's fix this would pass straight through into
+      // the zero-HP "reactor critical" branch and could eventually brick
+      // round completion; after the fix it must be rejected immediately,
+      // regardless of the shooter's actual position/range.
+      await expect(
+        game.write.moveShip(
+          [1n, 1n, creatorPos.row, creatorPos.col, ActionType.Shoot, 7n],
+          { account: creator.account },
+        ),
+      ).to.be.rejectedWith("InvalidMove");
+    });
+
     it("should block shooting when line of sight is obstructed", async function () {
       const {
         creatorLobbies,

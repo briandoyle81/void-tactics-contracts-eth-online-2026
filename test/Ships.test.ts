@@ -2315,6 +2315,68 @@ describe("Ships", function () {
       ).to.be.rejectedWith("ShipInFleet");
     });
 
+    it("rejects adding a destroyed ship to a fleet (HA2-03)", async function () {
+      const {
+        ships,
+        universalCredits,
+        user1,
+        user2,
+        owner,
+        randomManager,
+        metadataRenderer,
+        shipAttributes,
+      } = await loadFixture(deployShipsFixture);
+
+      // Authorize `owner` as gameAddress so this test can call setInFleet
+      // directly, same trick the "recycling ships in a fleet" test above uses.
+      const currentConfig = await ships.read.config();
+      await ships.write.setConfig(
+        [
+          owner.account.address, // gameAddress
+          "0x0000000000000000000000000000000000000000", // lobbyAddress
+          "0x0000000000000000000000000000000000000000", // fleetsAddress
+          currentConfig[3], // shipGenerator - keep existing
+          randomManager.address,
+          metadataRenderer.address,
+          shipAttributes.address,
+          universalCredits.address,
+          "0x0000000000000000000000000000000000000000",
+          "0x0000000000000000000000000000000000000000",
+        ],
+        { account: owner.account },
+      );
+
+      await ships.write.purchaseWithFlow(
+        [user1.account.address, 1n, user2.account.address, 1],
+        { value: parseEther("9.99") },
+      );
+      const shipIds = await ships.read.getShipIdsOwned([
+        user1.account.address,
+      ]);
+
+      // Simulate this ship having died in an earlier game -- the NFT is
+      // never burned, user1 still owns it. Before HA2-03's fix, nothing in
+      // setInFleet (or Fleets.createFleet's own validation) checked this,
+      // so a destroyed ship could be resubmitted into a brand-new fleet and
+      // fight normally until anyone tried to remove it there, permanently
+      // reverting ShipDestroyed().
+      await ships.write.markDestroyed([shipIds[0]], {
+        account: owner.account,
+      });
+
+      await expect(
+        ships.write.setInFleet([shipIds[0], true], {
+          account: owner.account,
+        }),
+      ).to.be.rejectedWith("ShipDestroyed");
+
+      // Only the "add to fleet" direction is guarded -- removing a
+      // destroyed ship (e.g. game cleanup routing it out) must still work.
+      await ships.write.setInFleet([shipIds[0], false], {
+        account: owner.account,
+      });
+    });
+
     it("Should not allow recycling ships owned by others", async function () {
       const { ships, universalCredits, user1, user2, shipPurchaser } =
         await loadFixture(deployShipsFixture);

@@ -359,6 +359,8 @@ There is no check that the `_shipId` belongs to the game identified by `_gameId`
 
 **Resolution (2026-07-16):** Confirmed with the project owner this is accepted as gas-waste-only, not a security risk. Since the C-03 fix added a snapshot-once guard (`if (attributes.version != 0) revert`), a stray call against a `_shipId` not actually in `_gameId` can only ever write into that ship's still-empty (`version == 0`) slot in that game's storage. Nothing in the game's logic ever reads `game.shipAttributes[x]` for an `x` that isn't an actual participant of that game (mappings aren't enumerable, so there's no iteration path that could pick up the stray entry either), so the write is permanently inert — it just costs the caller an SSTORE for no effect. No fix planned.
 
+**Reopened 2026-09-12 — the "nothing ever reads a stray entry" premise is false.** `Game._performShoot` (lines 770-837) reads `game.shipAttributes[targetShipId]` and `game.shipPositions[targetShipId]` for an attacker-chosen `targetShipId` with no check that it belongs to either fleet in `_gameId` — directly contradicting this finding's own resolution text. Combined with this same function's missing target-status check, this is no longer inert: see the new **Addendum — Hostile-Actor Full Audit Sweep (2026-09-12)**, finding **HA2-01**, for the full exploit chain (a live match can be permanently frozen). Do not treat this finding's "won't fix" status as current.
+
 ---
 
 ### ~~L-02 — `Fleets.removeShipFromFleet` Reads Cost After Clearing `inFleet`~~
@@ -1269,17 +1271,17 @@ When reveal was collapsed into `fulfillRandomRequest` (see the 2026-08-27 addend
 
 ## Addendum — Selfie Check Verification Gap in `FreeShipClaimSelfie` (2026-09-11)
 
-~~### SC-01 — Unverified `claimFreeShips` Path Left Open, Making Selfie-Check Gating Non-Enforcing
+### ~~SC-01 — Unverified `claimFreeShips` Path Left Open, Making Selfie-Check Gating Non-Enforcing~~
 
 **File:** `contracts/FreeShipClaimSelfie.sol`
 **Severity:** Medium — deliberate, known, and explicitly deferred; not an oversight
-**Status:** Open — intentionally deferred, not yet resolved
+**Status:** Resolved 2026-09-11 (see below) — was: Open, intentionally deferred, not yet resolved
 
 `FreeShipClaimSelfie.sol` adds a backend-relayed, Selfie-Check-verified claim path (`claimFreeShipsVerified`, gated by an `authorizedVerifiers` allowlist and per-nullifier reuse tracking) alongside the original `claimFreeShips(uint16)`. Selfie Check has no on-chain verification path (confirmed against World's own docs — verification is an off-chain REST call, unlike Orb's on-chain `groupId=1` path `Tournament.sol` already uses), so the verified path necessarily relies on a trusted backend relayer rather than an on-chain proof check.
 
 The original, fully unrestricted `claimFreeShips(uint16)` was deliberately left callable in this version, per explicit direction. That means the new verification machinery is not actually load-bearing yet: any caller can bypass Selfie Check entirely by calling the old function directly, exactly as before this contract existed. `FreeShipClaimSelfie` as it stands is infrastructure for the eventual gate, not the gate itself.
 
-**Not yet decided:** whether to eventually restrict or remove `claimFreeShips(uint16)` once the verified path is live and trusted, and if so, how to handle the resulting blast radius — the existing test suite (`test/Ships.test.ts`) calls `claimFreeShips` directly in numerous places and would need rework, and free-ship claiming would become hard-dependent on backend availability for the first time. Revisit before treating Selfie Check gating as an actual Sybil defense in the live product, not just a documented capability.~~
+**Not yet decided (as of when this finding was written):** whether to eventually restrict or remove `claimFreeShips(uint16)` once the verified path is live and trusted, and if so, how to handle the resulting blast radius — the existing test suite (`test/Ships.test.ts`) calls `claimFreeShips` directly in numerous places and would need rework, and free-ship claiming would become hard-dependent on backend availability for the first time. Revisit before treating Selfie Check gating as an actual Sybil defense in the live product, not just a documented capability.
 
 **Resolved 2026-09-11 — the architecture this finding describes no longer exists.**
 `FreeShipClaimSelfie.sol` (the standalone "V2" contract with a separate `claimFreeShipsVerified`
@@ -1322,3 +1324,335 @@ hot backend role (ship-minting, Selfie-Check verification, and any future backen
 either on its own key or deliberately consolidated with an explicit acknowledgment of the combined
 blast radius — not consolidated by default because no one has provisioned the separate keys yet.
 Not yet done; tracked here so it isn't mistaken for a finished decision.
+
+## Addendum — Hostile-Actor Full Audit Sweep (2026-09-12)
+
+**Methodology:** requested explicitly as "a complete and thorough audit of all the contracts,
+assuming a maximally hostile actor acting out of spite, malice, or profit — damage and theft both
+acceptable outcomes." Four independent, parallel deep-dive passes covered every state-changing
+contract in `contracts/` (excluding interfaces, mocks, `Types.sol`, and the `Renderers`/
+`RenderersV2` directories — confirmed via `grep` that no renderer file has a single non-`view`/
+`pure` external or public function, so they carry zero state-changing attack surface and were
+excluded on that basis, not skipped for convenience). Each pass read this entire document first
+and was instructed not to re-report already-triaged findings unless a prior resolution turned out
+to be wrong. The two highest-severity findings below (**HA2-01**, **HA2-02**) were independently
+re-verified line-by-line against the actual contract/library source by the coordinating session
+after the fact, not just accepted from the sub-review; the remainder were spot-checked against the
+cited lines. All findings are genuinely new — nothing below duplicates an existing entry, though
+**HA2-01 reopens L-01** (see that entry above) and **HA2-07** re-evaluates an already-accepted
+`RandomManager` risk in a new, higher-stakes context rather than reporting a new bug.
+
+---
+
+### HA2-01 — `Game._performShoot`/`calculateShipAttributes` let any player permanently freeze a live PvP match
+
+**File:** `contracts/Game.sol`, `calculateShipAttributes` (lines 338-356), `_performShoot` (lines
+770-837), `_removeShipFromGame` (lines 1138-1200), `_incrementReactorCriticalTimerForZeroHPShips`
+(lines 1223+)
+**Severity:** High — permanently, deterministically bricks a live match holding real NFT ships,
+with only a lossy escape hatch (see below); zero cost to the attacker beyond ordinary play.
+**Status:** Open — reopens L-01 above, whose "nothing ever reads a stray entry" resolution is
+disproven by this finding.
+
+`calculateShipAttributes(uint _gameId, uint _shipId)` is `public`, permissionless, and its only
+guard is `if (attributes.version != 0) revert` — it never checks `_shipId` is actually a
+participant of `_gameId`. `_performShoot` independently never checks
+`game.shipPositions[targetShipId].status`, and only validates the target globally
+(`_validateShipExistsAndNotDestroyed`, an existence/not-globally-destroyed check) plus an
+owner-mismatch check — it never checks the target is actually in either fleet for this game.
+
+**Exploit, verified end-to-end against the actual code (independently re-traced, not just taken on
+report):**
+1. Attacker (either player in active game `G`) picks any ship `X` owned by the opponent that has
+   fled `G` earlier (an ordinary `Retreat`, which `delete`s `game.shipAttributes[X]`, resetting
+   `version` to 0), or one that was never in `G` at all.
+2. Attacker calls the public `calculateShipAttributes(G, X)`. This passes (X's slot is empty) and
+   writes a fresh, full, non-zero `hullPoints`/`maxHullPoints` for `X` into `G`'s storage.
+3. Attacker moves in range and calls `Shoot` at `targetShipId = X`. `_performShoot` passes every
+   check it has (global existence, not globally destroyed, different owner, range/LOS against
+   whatever position `X` happens to have in this game — defaults to `(0,0)` if never placed) and
+   deals real damage, since `targetAttributes.hullPoints != 0` now.
+4. Enough shots bring `X`'s (fictitious) HP to 0 (`_setShipHPToZero`), adding it to
+   `game.shipsWithZeroHP`.
+5. On the next two round transitions, `_incrementReactorCriticalTimerForZeroHPShips` increments
+   `X`'s `reactorCriticalTimer` (0→1→2) — both succeed, since it only calls
+   `_removeShipFromGame` once the timer reaches 3.
+6. On the third round transition, the timer would go to 3, triggering
+   `_removeShipFromGame(G, X, ...)`. That function reverts `ShipNotFound()` because `X` is in
+   neither `game.metadata.creatorFleetId` nor `joinerFleetId` (confirmed directly: line 1159,
+   `if (!isCreatorShip && !isJoinerShip) revert ShipNotFound();`). Since the revert unwinds the
+   whole enclosing transaction, **the timer increment itself is rolled back too** — every future
+   attempt to complete this round re-starts from timer==2, re-attempts the identical 2→3
+   transition, and reverts identically, forever. The round can never complete again.
+
+**Partial, lossy mitigation:** `PvPMatch.flee` → `Game.forceEndSession` → `_endGame` bypasses the
+round-completion path entirely and unconditionally releases both fleets. A victim *can* recover
+their ships this way — but `flee` unconditionally makes the fleeing player the **loser**, crediting
+the attacker (or an unrelated bystander) with a win regardless of the actual board state. If
+neither player accepts that forced loss, both players' ships stay locked indefinitely, including
+via the owner's own `debugDestroyShip` (which also routes through `_removeShipFromGame` and hits
+the identical revert).
+
+**Recommended fix:** mirror the SP-02 fix already applied to `RamResolver`/`EMPResolver`/
+`DroneSwarmResolver` — add a `game.shipPositions[_shipId].status == 0` (and ideally an
+actual-fleet-membership) check to `_performShoot`'s target validation, and add an equivalent
+active-participant check to `calculateShipAttributes` itself as defense in depth (this also fully
+closes L-01, not just this specific chain into it).
+
+---
+
+### HA2-02 — `UTCLotteryHook._beforeInitialize` has no caller check — any third party can permanently hijack the pool lock
+
+**File:** `contracts/UTCLotteryHook.sol`, lines 194-211
+**Severity:** High — permanent, irrecoverable loss of the entire lottery feature for the real
+pool; zero cost to the attacker; **directly relevant to this project's own imminent deploy.**
+**Status:** Open — fix before running Phase 2 of `docs/deploy-runbook-uniswap-lottery.md`.
+
+```solidity
+function _beforeInitialize(
+    address,                    // <- `sender`, discarded entirely, never checked
+    PoolKey calldata key,
+    uint160
+) internal override returns (bytes4) {
+    if (poolLocked) revert PoolAlreadyLocked();
+    if (
+        Currency.unwrap(key.currency0) != address(0) ||
+        Currency.unwrap(key.currency1) != utcToken
+    ) revert NotOurPool();
+    lockedPoolId = key.toId();
+    poolLocked = true;
+    return BaseHook.beforeInitialize.selector;
+}
+```
+
+Independently confirmed against the actual Uniswap v4 source
+(`node_modules/@uniswap/v4-core/src/PoolManager.sol:117`): `PoolManager.initialize(PoolKey,
+uint160)` is `external` with **no access control whatsoever** beyond `noDelegateCall`, and passes
+the *real, original caller* as `sender` into the hook (`node_modules/@uniswap/v4-core/src/
+libraries/Hooks.sol:178-182`: `self.callHook(abi.encodeCall(IHooks.beforeInitialize,
+(msg.sender, key, sqrtPriceX96)))` — an internal library call, so `msg.sender` here is whoever
+called `PoolManager.initialize` externally, not `PoolManager` itself).
+
+**Exploit:** `scripts/deployUTCLotteryPool.ts` deploys the hook (step 7) and calls
+`PoolManager.initialize` (step 11) as **two separate transactions**, with UC-sourcing/approval/
+liquidity-math steps in between — a real, multi-transaction window against the live, shared Base
+Sepolia `PoolManager`. The hook's address is necessarily mineable/predictable in advance (that's
+the whole point of `scripts/hookMiner.ts`), and its deployed bytecode is public the instant the
+deploy transaction lands. Any third party — not just someone targeting this project specifically,
+but a bot that squats freshly-deployed hook addresses on a public testnet purely to grief for
+fun — can call `PoolManager.initialize(key, sqrtPriceX96)` directly with the correct
+`currency0 = address(0)` / `currency1 = utcToken` pair (the only thing `_beforeInitialize`
+checks) but an attacker-chosen fee tier, tick spacing, and price. This passes every check and
+permanently sets `poolLocked = true` / `lockedPoolId` to the attacker's bogus, liquidity-free
+pool. **There is no owner reset/unlock function for `poolLocked`/`lockedPoolId`** — this
+permanently and irrecoverably bricks the entire lottery feature for the project's real pool. The
+deploy script's own header comment ("no on-chain fix for a wrong key... mine and deploy a fresh
+hook") only anticipated *accidental* self-misconfiguration by the project's own deploy, not a
+hostile third party racing it.
+
+**Recommended fix:** check `sender == owner()` (or an explicit allowlist) in `_beforeInitialize`
+before locking — this is a one-line fix and should happen before Phase 2 of the deploy runbook
+ever runs for real. Alternatively/additionally, restructure the deploy so hook-deploy and
+pool-initialize happen atomically in one transaction (e.g. a multicall, or having the hook itself
+call `initialize` from its own constructor/an owner-only function), removing the exposure window
+entirely regardless of the access-control fix.
+
+---
+
+### HA2-03 — `Ships.setInFleet` doesn't check `timestampDestroyed`, letting a destroyed ship re-enter a fleet and become an unkillable "ghost" in a new match
+
+**File:** `contracts/Ships.sol`, `setInFleet` (lines 410-424)
+**Severity:** High — freezes a *different* live match (not the one the ship died in) via the same
+`ShipDestroyed()` revert-wall consequence as HA2-01, through an entirely separate root cause.
+**Status:** Open.
+
+```solidity
+function setInFleet(uint _id, bool _inFleet) external {
+    if (msg.sender != config.lobbyAddress && msg.sender != config.gameAddress && msg.sender != config.fleetsAddress)
+        revert NotAuthorized(msg.sender);
+    ships[_id].shipData.inFleet = _inFleet;
+    ...
+}
+```
+Never checks `ships[_id].shipData.timestampDestroyed`, which is permanent once set (`markDestroyed`/
+`recordKill` never clear it). `Ships._update` blocks *transferring* a destroyed ship, but nothing
+blocks it being flagged `inFleet = true` and reused by its own owner.
+
+**Exploit:**
+1. Player A's ship #100 is destroyed in Game 1. The NFT is never burned; A still owns it.
+2. A submits #100 into a fresh fleet for Game 2. `Fleets.createFleet` only checks owner match,
+   `inFleet`, cost/version, variant — never `timestampDestroyed` — so it's accepted.
+   `Game.startGame` computes fresh, full-health attributes for #100 with no destroyed check
+   anywhere in the path. #100 now fights normally in Game 2.
+3. The moment anyone triggers `_removeShipFromGame` for #100 in Game 2 (a killing blow, or A
+   retreating it), the call reverts `ShipDestroyed()` (`Game.sol:1148`,
+   `if (_ship.shipData.timestampDestroyed != 0) revert ShipDestroyed();`) — permanent, since
+   nothing ever clears the flag. Every transaction that would finish or retreat #100 in Game 2
+   reverts identically, forever, denying the opponent a kill/elimination-based resolution and
+   risking the same round-completion freeze as HA2-01 if #100 is queued via the zero-HP timer path.
+
+Confirmed this does **not** enable reward double-farming (a second `markDestroyed`/
+`setTimestampDestroyed` call on the same globally-destroyed ship reverts before any reward
+payout), so the confirmed consequence is match-freeze/denial, not token theft.
+
+**Recommended fix:** add a `timestampDestroyed == 0` guard to `Ships.setInFleet` when
+`_inFleet == true` — the single chokepoint every fleet-entry path already routes through.
+
+**Related, lower-severity data bug found alongside this:** `Ships._update` (lines 431-474) never
+resets `ship.owner` to `address(0)` on burn (`ship.owner = to;` only runs `if (to != address(0))`)
+— `getShip(id).owner` for a burned ship still shows the pre-burn owner. Not independently
+exploitable today (a burned ship's `timestampDestroyed` is always set too, hitting the same
+`ShipDestroyed()` wall as above), but any future code trusting `ship.owner` without also checking
+`timestampDestroyed`/real ERC-721 existence would treat a burned, non-existent NFT as live.
+Severity: Low/Informational — worth closing given how much cross-contract trust in this repo reads
+`ship.owner` rather than `ownerOf()`.
+
+---
+
+### HA2-04 — `RoguelikeMatch.enterResupplyNode` doesn't check for an in-flight combat game, letting a player detach `run.currentNodeId` from the node actually being fought
+
+**File:** `contracts/RoguelikeMatch.sol`, `enterResupplyNode` (lines 246-257), compounded by
+`onGameEnded` (387-499) and `RoguelikeResupply.sol`'s `_requireAtResupplyNode`/`resupplyRepair`/
+`resupplyModifyRoster` (101-208)
+**Severity:** High (structural — see caveat) **Status:** Open.
+
+`retreatRun(0)` was hardened under SP-05 to revert `ActiveGameInProgress` if `run.activeGameId !=
+0`. `enterResupplyNode` was never given the same guard:
+```solidity
+function enterResupplyNode(uint _targetNodeId) external {
+    Run memory run = runLedger.getRun(msg.sender);
+    if (run.status != RunStatus.Active) revert NoActiveRun();
+    RoguelikeNode memory node = _commitToNode(msg.sender, run, _targetNodeId);
+    ...
+}
+```
+`_commitToNode` only checks graph adjacency/locks, never `run.activeGameId`. `enterCombatNode` is
+naturally protected from double-entry because roster ships are still `inFleet == true` in the live
+game's fleet (`Fleets.createFleet` reverts `ShipAlreadyInFleet`) — `enterResupplyNode` touches no
+fleet/ship state at all, so nothing stops it.
+
+**Exploit, verified against the actual seeded campaign content (`ignition/data/
+roguelikeStarterContent.json`):**
+1. Player calls `enterCombatNode(m05, …)` → game `G1` created, `run.activeGameId = G1`,
+   `run.currentNodeId = m05`.
+2. **Without resolving `G1`**, player calls `enterResupplyNode(r01)` — `r01` is `m05`'s real
+   forward child in the deployed content, so it succeeds: `run.currentNodeId` becomes `r01` while
+   `G1` is still open.
+3. Player finishes `G1` (wins it). `onGameEnded(G1, player, …)`'s stale-callback guard checks only
+   *which game* (`run.activeGameId == G1`), not *which node* — it still passes.
+4. `runLedger.setNodeDefeated(player, run.currentNodeId)` marks **`r01`** (the Resupply node) as
+   defeated, not `m05` (the fight actually won). `isFinalNode`/win-effects also evaluate against
+   `r01`'s data, not `m05`'s.
+
+In the currently-seeded content every Resupply node has exactly one forward child and no
+`twoWay` edges exist, so the two most severe consequences (an instant full-campaign win if the
+wrong node happens to have zero children; reopening the SP-05 farming fix if a `twoWay` edge ever
+lets the player walk back to the real, still-not-marked-defeated fight) aren't reachable *today* —
+but the wrong node's `defeated` flag and win-effects fire unconditionally, every time, regardless
+of content shape. `RoguelikeResupply.resupplyRepair`/`resupplyModifyRoster` share the same missing
+guard.
+
+**Recommended fix:** add `if (run.activeGameId != 0) revert ActiveGameInProgress();` to
+`enterResupplyNode` (and consider the same in `RoguelikeResupply`'s two functions), mirroring
+`retreatRun(0)`'s existing guard. Treat as urgent before any campaign content adds a `twoWay` edge
+or a leaf Resupply node — both of which this codebase's own design already treats as normal,
+expected content shapes.
+
+---
+
+### HA2-05 — `Lobbies`: `reservedJoiner` is never cleared outside `acceptGame`/`rejectGame`, letting an invited player permanently lock — or, after a creator-leave promotion, permanently brick — a lobby
+
+**File:** `contracts/Lobbies.sol`, `joinLobby` (384-436, no reset), contrast `acceptGame` (455-459,
+which does reset it). Also `leaveLobby` (187-271), `timeoutJoiner` (490-532), `quitWithPenalty`
+(642-688) — none clear it either.
+**Severity:** Medium **Status:** Open.
+
+A `reservedJoiner` can join via plain `joinLobby` (permitted when `msg.sender ==
+reservedJoiner`) as well as via `acceptGame` — but only `acceptGame` clears the field afterward.
+Every path that later reopens the lobby (`leaveLobby`'s branches, `timeoutJoiner`,
+`quitWithPenalty`) resets `joiner`/state back to "open" but leaves the stale `reservedJoiner`
+value in place.
+
+**Exploit:**
+1. Alice `createLobby(..., reservedJoiner: Bob)`, paying the UTC reservation fee.
+2. Bob `joinLobby(lobbyId)` (permitted; does not clear `reservedJoiner`).
+3. Bob immediately `leaveLobby` (or just never submits a fleet until `timeoutJoiner`). The lobby
+   resets to `Open`, but `reservedJoiner` still equals Bob.
+4. Any other player who now calls `joinLobby` gets `NotReservedJoiner()` — the lobby is
+   permanently locked to Bob, at zero further cost or obligation to him. Only Bob can release it.
+
+Cost to attacker: two cheap transactions, no ETH, repeatable against Alice every time she tries to
+invite him again. **Worse variant:** if Alice (the creator) is the one who leaves after Bob has
+joined, `leaveLobby` promotes Bob to creator — but `reservedJoiner` still equals Bob, now literally
+equal to the lobby's own creator. Since `joinLobby` also blocks `creator == msg.sender`, **no
+address can ever join this lobby again** — it's permanently dead.
+
+**Recommended fix:** clear `lobby.players.reservedJoiner = address(0)` in `joinLobby` right after
+consuming a reservation, and in every path that resets a lobby back to genuinely public "open."
+
+---
+
+### HA2-06 — `UTCLotteryHook` entry "weight" is gameable via a flash-loan round-trip
+
+**File:** `contracts/UTCLotteryHook.sol`, `_recordSell` (265-297)
+**Severity:** Medium (confidence: mechanism is sound; real profitability depends on pool depth
+relative to prize value at deploy time, which can't be assessed from the contract alone).
+**Status:** Open — informational for now, worth re-checking once real liquidity depth is set.
+
+Weight = a single sell's realized ETH proceeds, with no requirement that the capital be retained
+afterward. An attacker can flash-borrow UTC, sell it for ETH in one swap (registering a large
+weight to any address via `hookData`), then buy back the borrowed UTC in a following swap
+(`zeroForOne = true`, which earns no entry) to repay the loan — paying only the round-trip
+fee/slippage rather than the full economic cost of holding that capital. This lets a
+well-capitalized-for-one-block (not well-capitalized-in-general) attacker dominate a draw's odds
+cheaply if the pool is shallow relative to the flash-loanable UTC/ETH supply. Cost scales with
+pool depth (deeper pool → smaller relative slippage cost → cheaper to game), so this is directly
+actionable via the real liquidity-seeding decision in `docs/deploy-runbook-uniswap-lottery.md`.
+
+---
+
+### HA2-07 — `Tournament.buildBracket()`'s seed shuffle inherits `RandomManager`'s already-documented "patient caller can preview and choose" risk, now exposed to real prize money
+
+**File:** `contracts/Tournament.sol`, `buildBracket`/`_shuffleSeeds` (340-354, 588-606)
+**Severity:** Medium (mechanism confidence: high; real-world severity: depends on prize-pool size
+and how quickly a keeper calls `buildBracket`). **Status:** Open — re-evaluation of an existing
+accepted risk, not a new bug.
+
+This is new/unaudited territory — the existing T-01–T-05 findings predate `buildBracket()`/
+`_shuffleSeeds` entirely. `buildBracket` is permissionless and calls
+`randomManager.fulfillRandomRequest()`, whose result is a deterministic function of the
+currently-public `block.prevrandao` once the entropy epoch has rolled over — `RandomManager.sol`'s
+own header comments already document and accept that a patient caller can simulate outcomes
+off-chain for the current epoch and simply decline to submit until a favorable one appears. That
+acceptance was reasoned about for near-worthless ship construction ("99.9% of ships worth under
+$1"). `Tournament` prize pools (entry fees × N, plus uncapped sponsor contributions) are a
+materially different stakes context that was never re-evaluated against this same mechanism.
+Recommend the project owner explicitly re-confirm whether the existing `RandomManager` risk
+acceptance still holds now that it gates real prize money via `Tournament`, rather than assuming
+the original ship-construction reasoning still applies.
+
+---
+
+### HA2-08 — `RepairResolver`/`RepairDronesResolver` missing the SP-02 target-status check (currently inert, but relies on an assumption HA2-01 disproves)
+
+**File:** `contracts/RepairResolver.sol` (51-83), `contracts/RepairDronesResolver.sol` (51-86)
+**Severity:** Low/Informational. **Status:** Open.
+
+Unlike `RamResolver`/`EMPResolver`/`DroneSwarmResolver` (all patched under SP-02 with
+`if (target.status != 0) revert ...`), these two heal-only resolvers check only `target.shipId ==
+0` and friend/enemy, never `target.status`. Today this is inert: healing a stale/ghost target
+computes `healCap` from `maxHullPoints`, which is `0` for a `delete`d ghost, so the heal clamp
+never actually changes anything. **HA2-01 demonstrates that `maxHullPoints == 0` is not a reliable
+assumption** — `calculateShipAttributes` can revive a ghost's `maxHullPoints` to a real, non-zero
+value. Recommend adding the same `target.status != 0` check here for consistency and
+defense-in-depth, independent of HA2-01's own fix.
+
+---
+
+**Summary for prioritization:** HA2-02 is the most time-sensitive — fix before Phase 2 of
+`docs/deploy-runbook-uniswap-lottery.md` ever runs against a real network. HA2-01/HA2-03/HA2-04 are
+the most severe for the core game (all three follow the same shape as the already-fixed SP-02: a
+missing status/membership check that lets a hostile player permanently freeze or miscredit a live
+match) and should be fixed together, likely in one pass given how similar the fix pattern is.
+HA2-05/HA2-06/HA2-07 are real but lower urgency. HA2-08 is cheap defense-in-depth to bundle with
+HA2-01's fix.

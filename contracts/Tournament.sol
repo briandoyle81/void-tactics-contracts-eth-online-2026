@@ -84,6 +84,9 @@ contract Tournament is Ownable, ReentrancyGuard {
         mapping(address => uint32) seed; // 1-based shuffled seed (0 == not registered / not yet shuffled)
         mapping(uint256 => bool) usedNullifiers;
         uint256 randomRequestId; // RandomManager request backing this tournament's seed shuffle
+        // HA2-07: buildBracket() must reveal randomRequestId by this
+        // timestamp or it's considered stale — see SHUFFLE_REVEAL_WINDOW.
+        uint256 shuffleDeadline;
         Match[] bracket; // flattened single-elim bracket, all slots pre-allocated
         uint32 bracketSize; // N (next power of 2 >= registrants)
         uint8 totalRounds; // log2(N)
@@ -105,6 +108,19 @@ contract Tournament is Ownable, ReentrancyGuard {
     uint16 public constant PROTOCOL_FEE_BPS = 100; // 1.00%
     uint256 public constant MIN_MATCH_TIMEOUT = 3600; // 1 hour
     uint256 public constant MAX_MATCH_TIMEOUT = 604800; // 1 week
+    // HA2-07: a patient outside observer can preview, for free, what
+    // buildBracket()'s shuffle would produce for the current RandomManager
+    // epoch (the registrant list is already frozen by start()) and simply
+    // decline to submit until a favorable epoch appears. Starting had no
+    // timeout, so that wait was unbounded. This constant bounds it: once a
+    // pending shuffle request outlives this window unused, anyone can force
+    // a fresh one via rerollBracketShuffle, discarding whatever epochs were
+    // being ground through against the stale request. Doesn't remove the
+    // preview-and-decline ability itself (that requires a real multi-party
+    // secret or an external VRF — see docs/audit-2.md HA2-07), but bounds
+    // how many free looks a single stale request can be checked against
+    // before it's invalidated out from under whoever was waiting on it.
+    uint256 public constant SHUFFLE_REVEAL_WINDOW = 10 minutes;
 
     uint256 public tournamentCount;
     mapping(uint256 => TournamentData) internal tournaments;
@@ -136,6 +152,9 @@ contract Tournament is Ownable, ReentrancyGuard {
     // RandomManager reveal window opens) to actually build the bracket and
     // move the tournament to Active — see TournamentStarted below.
     event TournamentClosing(uint256 indexed tournamentId, uint256 randomRequestId);
+    // HA2-07: fires when a pending shuffle request expired unused (see
+    // SHUFFLE_REVEAL_WINDOW) and rerollBracketShuffle replaced it.
+    event BracketShuffleRerolled(uint256 indexed tournamentId, uint256 newRandomRequestId);
     event TournamentStarted(uint256 indexed tournamentId, uint8 totalRounds, uint256 matchCount);
     event MatchGameAssigned(uint256 indexed tournamentId, uint256 indexed matchId, uint256 gameId);
     event MatchResolved(uint256 indexed tournamentId, uint256 indexed matchId, address winner, bytes32 walrusBlobId);
@@ -179,6 +198,8 @@ contract Tournament is Ownable, ReentrancyGuard {
     error GameAlreadyAssigned();
     error NotAMatchPlayer();
     error NotStarting();
+    error ShuffleWindowExpired();
+    error ShuffleWindowNotExpired();
 
     constructor(
         address _worldId,
@@ -333,6 +354,7 @@ contract Tournament is Ownable, ReentrancyGuard {
         // to it.
         uint256 requestId = randomManager.requestRandomness();
         t.randomRequestId = requestId;
+        t.shuffleDeadline = block.timestamp + SHUFFLE_REVEAL_WINDOW;
         t.state = TournamentState.Starting;
         emit TournamentClosing(tournamentId, requestId);
     }
@@ -341,16 +363,37 @@ contract Tournament is Ownable, ReentrancyGuard {
     /// the bracket. Permissionless (like assignMatchGame/recordResult) so no
     /// single party staying offline can block every registrant from ever
     /// reaching Active. Reverts with RandomManager's own TooSoonToReveal if
-    /// called before the reveal window has opened.
+    /// called before the reveal window has opened, or ShuffleWindowExpired
+    /// if the pending request outlived SHUFFLE_REVEAL_WINDOW unused (HA2-07)
+    /// — call rerollBracketShuffle in that case to get a fresh request.
     function buildBracket(uint256 tournamentId) external {
         TournamentData storage t = _get(tournamentId);
         if (t.state != TournamentState.Starting) revert NotStarting();
+        if (block.timestamp > t.shuffleDeadline) revert ShuffleWindowExpired();
 
         uint64 randomness = randomManager.fulfillRandomRequest(t.randomRequestId);
         address[] memory bySeed = _shuffleSeeds(t, randomness);
         _buildBracket(t, bySeed);
         t.state = TournamentState.Active;
         emit TournamentStarted(tournamentId, t.totalRounds, t.bracket.length);
+    }
+
+    /// @notice HA2-07 escape hatch: once a pending shuffle request has sat
+    /// unused past SHUFFLE_REVEAL_WINDOW, anyone can force a fresh
+    /// RandomManager request, discarding whatever epochs a patient observer
+    /// may have been previewing against the stale one. Permissionless, same
+    /// reasoning as buildBracket itself — no single (possibly hostile)
+    /// party staying offline should be able to block progress, and here
+    /// that includes a party deliberately withholding a favorable reveal.
+    function rerollBracketShuffle(uint256 tournamentId) external {
+        TournamentData storage t = _get(tournamentId);
+        if (t.state != TournamentState.Starting) revert NotStarting();
+        if (block.timestamp <= t.shuffleDeadline) revert ShuffleWindowNotExpired();
+
+        uint256 requestId = randomManager.requestRandomness();
+        t.randomRequestId = requestId;
+        t.shuffleDeadline = block.timestamp + SHUFFLE_REVEAL_WINDOW;
+        emit BracketShuffleRerolled(tournamentId, requestId);
     }
 
     function cancel(uint256 tournamentId) external {

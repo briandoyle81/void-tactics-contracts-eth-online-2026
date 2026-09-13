@@ -209,6 +209,20 @@ no budgeted fallback if this pick doesn't ship.
      address inflate its odds by splitting one large sell into many small ones. Winner selection:
      a linear cumulative-weight scan over that draw's unique participants (not binary search —
      simpler, fully sufficient at this scale).
+   - **Per-entry weight cap + max win probability — resolved (2026-09-12, docs/audit-2.md HA2-06).**
+     A single sell's *credited weight* is capped at `maxWeightPerEntryWei` (default 1 ETH),
+     independent of its real, uncapped proceeds — bounds how much one trade (flash-loaned or
+     genuinely funded) can inflate one address's odds. Combined with `maxWinProbabilityDenominator`
+     (default 10), `resolveDraw`'s random pick is floored at `maxWinProbabilityDenominator *
+     maxWeightPerEntryWei` — guaranteeing no address can ever exceed a
+     `1/maxWinProbabilityDenominator` share of a draw, not just a bounded absolute weight (which
+     alone would still let a whale claim close to 100% of a thinly-participated draw). A pick
+     landing beyond real participants' cumulative weight means nobody wins that draw
+     (`DrawResolvedNoWinner(drawId)`) — the next qualifying sell just starts accumulating toward the
+     next draw, no rollover bookkeeping needed. Reasoning: a flash-loan round-trip here was never a
+     fund-theft risk (both legs are real, fee-paying swaps against the real pool) — the actual
+     concern was draw fairness, resolved by bounding *share*, not by trying to detect or block the
+     flash-loan technique itself.
    - Minimum qualifying trade size **denominated in ETH, not UTC** (`minEntryThresholdWei`) —
      insulates entry cost from UTC's own price swings. **Set to 0.01 ETH.**
    - **Draw eligibility — resolved, and more than just a timer.** A draw only starts once *all*
@@ -255,10 +269,11 @@ no budgeted fallback if this pick doesn't ship.
 
 **Still open / not yet done:**
 
-1. `minEntryThresholdWei` (0.01 ETH), `drawInterval` (24h), `minParticipants` (3), and
-   `minTotalWeightWei` (0) are all live, sensible-but-not-yet-validated defaults — worth
-   confirming against real expected trading volume once there's live data to check them against,
-   not left as permanent assumptions.
+1. `minEntryThresholdWei` (0.01 ETH), `drawInterval` (24h), `minParticipants` (3),
+   `minTotalWeightWei` (0), `maxWeightPerEntryWei` (1 ETH), and `maxWinProbabilityDenominator`
+   (10, i.e. never better than a 1-in-10 chance) are all live, sensible-but-not-yet-validated
+   defaults — worth confirming against real expected trading volume once there's live data to
+   check them against, not left as permanent assumptions.
 2. **No pool has actually been deployed yet, but a concrete deploy plan is written (2026-09-12).**
    `UTCLotteryHook.sol` itself is built and tested against a real local `PoolManager`, but isn't
    live anywhere. A new standalone script, `scripts/deployUTCLotteryPool.ts` (not yet written —

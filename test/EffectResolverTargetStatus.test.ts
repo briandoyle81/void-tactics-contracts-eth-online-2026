@@ -7,6 +7,11 @@ import hre from "hardhat";
 // stale, already-gone ship's deleted (zeroed) Attributes can look like a
 // legitimate target. Uses MockGameView/MockShipAttributesSpecial rather than a
 // full game so each resolver's own validation logic is exercised directly.
+//
+// RepairResolver/RepairDronesResolver were added later (docs/audit-2.md
+// HA2-08) — they're heal-only (friendly-target) resolvers, so their target
+// needs matching isCreator, not opposing, to isolate the status check from
+// the separate TargetNotFriendly check.
 describe("Effect resolver target-status validation (SP-02)", function () {
   const GAME_ID = 1n;
   const ACTING_SHIP_ID = 1n;
@@ -24,6 +29,17 @@ describe("Effect resolver target-status validation (SP-02)", function () {
       shipId: TARGET_SHIP_ID,
       position: { row: 0, col: 1 },
       isCreator: false,
+      status,
+    };
+  }
+
+  // Same isCreator as actingPosition (true) — a friendly target, for the
+  // two heal-only resolvers below.
+  function friendlyTargetPosition(status: number) {
+    return {
+      shipId: TARGET_SHIP_ID,
+      position: { row: 0, col: 1 },
+      isCreator: true,
       status,
     };
   }
@@ -248,6 +264,128 @@ describe("Effect resolver target-status validation (SP-02)", function () {
         0,
       ]);
       expect(effects.length).to.equal(2);
+    });
+  });
+
+  describe("RepairResolver", function () {
+    async function deployResolver(gameView: any) {
+      return hre.viem.deployContract("RepairResolver", [gameView.address]);
+    }
+
+    it("rejects a fled/destroyed friendly target (status != 0) — HA2-08", async function () {
+      const gameView = await deployGameView();
+      const resolver = await deployResolver(gameView);
+      await gameView.write.setShipPosition([
+        GAME_ID,
+        ACTING_SHIP_ID,
+        actingPosition,
+      ]);
+      await gameView.write.setShipPosition([
+        GAME_ID,
+        TARGET_SHIP_ID,
+        friendlyTargetPosition(2), // fled
+      ]);
+
+      await expect(
+        resolver.read.resolveEffect([
+          GAME_ID,
+          ACTING_SHIP_ID,
+          1,
+          TARGET_SHIP_ID,
+          0,
+          0,
+        ]),
+      ).to.be.rejectedWith("TargetNotFound");
+    });
+
+    it("accepts a live friendly target (status == 0) — control for the check above", async function () {
+      const gameView = await deployGameView();
+      const resolver = await deployResolver(gameView);
+      await gameView.write.setShipPosition([
+        GAME_ID,
+        ACTING_SHIP_ID,
+        actingPosition,
+      ]);
+      await gameView.write.setShipPosition([
+        GAME_ID,
+        TARGET_SHIP_ID,
+        friendlyTargetPosition(0),
+      ]);
+
+      const effects = await resolver.read.resolveEffect([
+        GAME_ID,
+        ACTING_SHIP_ID,
+        1,
+        TARGET_SHIP_ID,
+        0,
+        0,
+      ]);
+      expect(effects.length).to.equal(1);
+    });
+  });
+
+  describe("RepairDronesResolver", function () {
+    async function deployResolver(gameView: any) {
+      const shipAttrs = await hre.viem.deployContract(
+        "MockShipAttributesSpecial",
+        [5, 10],
+      );
+      return hre.viem.deployContract("RepairDronesResolver", [
+        gameView.address,
+        shipAttrs.address,
+        1, // Special.Slot1
+      ]);
+    }
+
+    it("rejects a fled/destroyed friendly target (status != 0) — HA2-08", async function () {
+      const gameView = await deployGameView();
+      const resolver = await deployResolver(gameView);
+      await gameView.write.setShipPosition([
+        GAME_ID,
+        ACTING_SHIP_ID,
+        actingPosition,
+      ]);
+      await gameView.write.setShipPosition([
+        GAME_ID,
+        TARGET_SHIP_ID,
+        friendlyTargetPosition(1), // destroyed
+      ]);
+
+      await expect(
+        resolver.read.resolveEffect([
+          GAME_ID,
+          ACTING_SHIP_ID,
+          1,
+          TARGET_SHIP_ID,
+          0,
+          0,
+        ]),
+      ).to.be.rejectedWith("TargetNotFound");
+    });
+
+    it("accepts a live friendly target (status == 0) — control for the check above", async function () {
+      const gameView = await deployGameView();
+      const resolver = await deployResolver(gameView);
+      await gameView.write.setShipPosition([
+        GAME_ID,
+        ACTING_SHIP_ID,
+        actingPosition,
+      ]);
+      await gameView.write.setShipPosition([
+        GAME_ID,
+        TARGET_SHIP_ID,
+        friendlyTargetPosition(0),
+      ]);
+
+      const effects = await resolver.read.resolveEffect([
+        GAME_ID,
+        ACTING_SHIP_ID,
+        1,
+        TARGET_SHIP_ID,
+        0,
+        0,
+      ]);
+      expect(effects.length).to.equal(1);
     });
   });
 });

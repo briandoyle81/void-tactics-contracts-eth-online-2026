@@ -789,21 +789,43 @@ contract Game is Ownable {
         // transient slot than the flat mapping this replaced — see I-06 fix).
         Attributes storage shooterAttributes = game.shipAttributes[_shipId];
         {
-            Position memory shooterPos = Position(_newRow, _newCol);
-            Position storage targetPos = game.shipPositions[targetShipId].position;
-            uint8 manhattan = _manhattanDistance(shooterPos, targetPos);
-            if (manhattan > shooterAttributes.range) revert InvalidMove();
-
-            // Must have line of sight to target if manhattan > 1, can always see adjacent to shoot
+            ShipPosition storage targetShipPos = game.shipPositions[targetShipId];
+            uint8 manhattan = _manhattanDistance(
+                Position(_newRow, _newCol),
+                targetShipPos.position
+            );
+            // Combined into one revert (was three separate if/revert blocks)
+            // purely to save bytecode — Game.sol has no headroom to spare.
+            // Conditions, in original order:
+            //   1-2. Reject a target that was never placed in this game
+            //      (shipId == 0, the default-zeroed struct for any id
+            //      shipPositions was never written for) or that has since
+            //      fled/been destroyed (status != 0) — entries aren't
+            //      deleted on removal, only status flips, so shipId alone
+            //      doesn't catch a stale target. Without this, a hostile
+            //      caller can target any ship id at all (not just this
+            //      game's participants), reach the 0-HP reactor-timer branch
+            //      below for it, and permanently brick round completion when
+            //      _removeShipFromGame reverts ShipNotFound for a
+            //      non-participant (see docs/audit-2.md HA2-01). Mirrors the
+            //      same check RamResolver/EMPResolver/DroneSwarmResolver
+            //      already have (SP-02).
+            //   3. Out of range.
+            //   4. Out of line of sight (only checked past range 1 — the
+            //      short-circuiting && below skips the external maps.hasMaps
+            //      call entirely when adjacent, exactly as before).
             if (
-                manhattan > 1 &&
-                !maps.hasMaps(
-                    _gameId,
-                    _newRow,
-                    _newCol,
-                    targetPos.row,
-                    targetPos.col
-                )
+                targetShipPos.shipId == 0 ||
+                targetShipPos.status != 0 ||
+                manhattan > shooterAttributes.range ||
+                (manhattan > 1 &&
+                    !maps.hasMaps(
+                        _gameId,
+                        _newRow,
+                        _newCol,
+                        targetShipPos.position.row,
+                        targetShipPos.position.col
+                    ))
             ) {
                 revert InvalidMove();
             }

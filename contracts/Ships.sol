@@ -415,6 +415,16 @@ contract Ships is ERC721, Ownable, ReentrancyGuard {
         ) {
             revert NotAuthorized(msg.sender);
         }
+        // Only guard the "add to fleet" direction — removing a destroyed
+        // ship from a fleet (e.g. during game cleanup) must still work.
+        // Without this, a ship destroyed in one game can be resubmitted
+        // into a fresh fleet for a new game (nothing else in the
+        // createFleet path checks timestampDestroyed either) and fight
+        // normally until anyone tries to remove it there, permanently
+        // reverting ShipDestroyed() forever (see docs/audit-2.md HA2-03).
+        if (_inFleet && ships[_id].shipData.timestampDestroyed != 0) {
+            revert ShipDestroyed();
+        }
 
         ships[_id].shipData.inFleet = _inFleet;
 
