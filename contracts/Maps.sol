@@ -744,20 +744,24 @@ contract Maps is Ownable {
 
     /**
      * @dev Check if a tile is blocked safely (for internal use in LOS)
-     * @param _gameId The game ID
+     * @param _bitmap The game's blockedTilesBitmap, read once by the caller
+     *        (hasMaps) and threaded through — a Bresenham walk calls this
+     *        50-80 times per hasMaps call, so re-reading the same storage
+     *        slot from every call site is real, avoidable per-shot overhead
+     *        (G-03); it never changes within a single hasMaps call.
      * @param _row The row coordinate
      * @param _col The column coordinate
      * @return Whether the tile is blocked (treats OOB as blocked)
      */
     function _isTileBlockedSafe(
-        uint _gameId,
+        uint256 _bitmap,
         int16 _row,
         int16 _col
-    ) internal view returns (bool) {
+    ) internal pure returns (bool) {
         if (_row < 0 || _row >= GRID_HEIGHT || _col < 0 || _col >= GRID_WIDTH) {
             return true; // Treat out of bounds as blocked
         }
-        return _isBitSet(blockedTilesBitmap[_gameId], _bitIndex(_row, _col));
+        return _isBitSet(_bitmap, _bitIndex(_row, _col));
     }
 
     /**
@@ -805,17 +809,20 @@ contract Maps is Ownable {
             _col1 >= GRID_WIDTH
         ) revert InvalidPosition();
 
+        // Read once, thread through — see _isTileBlockedSafe's comment (G-03).
+        uint256 bitmap = blockedTilesBitmap[_gameId];
+
         // Early checks - always check start and end
-        if (_isTileBlockedSafe(_gameId, _row0, _col0)) {
+        if (_isTileBlockedSafe(bitmap, _row0, _col0)) {
             return false;
         }
 
         if (_row0 == _row1 && _col0 == _col1) {
-            return !_isTileBlockedSafe(_gameId, _row1, _col1);
+            return !_isTileBlockedSafe(bitmap, _row1, _col1);
         }
 
         // Use Bresenham's algorithm for line of sight (always permissive mode)
-        return _bresenhamMaps(_gameId, _row0, _col0, _row1, _col1);
+        return _bresenhamMaps(bitmap, _row0, _col0, _row1, _col1);
     }
 
     /**
@@ -824,12 +831,12 @@ contract Maps is Ownable {
      * Optimized to avoid stack too deep errors
      */
     function _bresenhamMaps(
-        uint _gameId,
+        uint256 _bitmap,
         int16 _row0,
         int16 _col0,
         int16 _row1,
         int16 _col1
-    ) internal view returns (bool) {
+    ) internal pure returns (bool) {
         // Calculate deltas and signs - minimize local variables
         int16 dRow = _row1 > _row0 ? _row1 - _row0 : _row0 - _row1;
         int16 dCol = _col1 > _col0 ? _col1 - _col0 : _col0 - _col1;
@@ -848,7 +855,7 @@ contract Maps is Ownable {
         while (true) {
             // Check if we've reached the target
             if (row == _row1 && col == _col1) {
-                return !_isTileBlockedSafe(_gameId, row, col);
+                return !_isTileBlockedSafe(_bitmap, row, col);
             }
 
             int16 e2 = err << 1;
@@ -857,8 +864,8 @@ contract Maps is Ownable {
             if (e2 == 0) {
                 // Check flankers before moving
                 if (
-                    _isTileBlockedSafe(_gameId, row, col + sCol) &&
-                    _isTileBlockedSafe(_gameId, row + sRow, col)
+                    _isTileBlockedSafe(_bitmap, row, col + sCol) &&
+                    _isTileBlockedSafe(_bitmap, row + sRow, col)
                 ) {
                     return false;
                 }
@@ -872,7 +879,7 @@ contract Maps is Ownable {
                 // Check new cell unless it's the target
                 if (
                     (row != _row1 || col != _col1) &&
-                    _isTileBlockedSafe(_gameId, row, col)
+                    _isTileBlockedSafe(_bitmap, row, col)
                 ) {
                     return false;
                 }
@@ -885,7 +892,7 @@ contract Maps is Ownable {
                 col += sCol;
                 if (
                     (row != _row1 || col != _col1) &&
-                    _isTileBlockedSafe(_gameId, row, col)
+                    _isTileBlockedSafe(_bitmap, row, col)
                 ) {
                     return false;
                 }
@@ -897,7 +904,7 @@ contract Maps is Ownable {
                 row += sRow;
                 if (
                     (row != _row1 || col != _col1) &&
-                    _isTileBlockedSafe(_gameId, row, col)
+                    _isTileBlockedSafe(_bitmap, row, col)
                 ) {
                     return false;
                 }

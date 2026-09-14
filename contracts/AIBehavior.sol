@@ -63,6 +63,15 @@ library AIBehavior {
         }
     }
 
+    // O(n) scan — only use this for a single specific shipId (e.g. the one
+    // ship whose turn is being decided this call). Do NOT call this inside a
+    // loop over ctx.g.shipPositions/joinerActiveShipIds: Game.getGame()
+    // builds shipIds/shipAttributes and shipPositions from the exact same
+    // creatorActiveShipIds-then-joinerActiveShipIds ordering (see
+    // Game.sol's getGame/getAllShipPositions), so for any index i where
+    // shipPositions[i].status == 0 (the only case any candidate-scan helper
+    // below ever needs), shipAttributes[i] is already that exact ship's
+    // attributes — read it directly instead of re-scanning for it (G-01).
     function findAttributes(
         GameDataView memory g,
         uint shipId
@@ -118,11 +127,10 @@ library AIBehavior {
                 )
             ) continue;
 
-            (Attributes memory attrs, bool attrsFound) = findAttributes(
-                ctx.g,
-                sp.shipId
-            );
-            if (!attrsFound) continue;
+            // sp.status == 0 already checked above, so index i is in the
+            // active range and shipAttributes[i] is guaranteed to be this
+            // exact ship's attributes (G-01) — no scan needed.
+            Attributes memory attrs = ctx.g.shipAttributes[i];
 
             bool onTile = _isScoringTile(ctx.scoringPositions, sp.position);
 
@@ -186,11 +194,9 @@ library AIBehavior {
                 continue; // own side only, not self
             if (_manhattan(ctx.pos, sp.position) > range) continue;
 
-            (Attributes memory attrs, bool attrsFound) = findAttributes(
-                ctx.g,
-                sp.shipId
-            );
-            if (!attrsFound || attrs.hullPoints >= attrs.maxHullPoints)
+            // sp.status == 0 already checked above (G-01) — direct index read.
+            Attributes memory attrs = ctx.g.shipAttributes[i];
+            if (attrs.hullPoints >= attrs.maxHullPoints)
                 continue; // not actually injured
 
             bool isZero = attrs.hullPoints == 0;
@@ -228,11 +234,8 @@ library AIBehavior {
                 ShipPosition memory sp = ctx.g.shipPositions[i];
                 if (sp.shipId == ctx.shipId || sp.status != 0 || !sp.isCreator)
                     continue;
-                (Attributes memory attrs, bool attrsFound) = findAttributes(
-                    ctx.g,
-                    sp.shipId
-                );
-                if (!attrsFound || attrs.hullPoints != 0) continue;
+                // sp.status == 0 already checked above (G-01) — direct index read.
+                if (ctx.g.shipAttributes[i].hullPoints != 0) continue;
                 uint16 dist = _manhattan(ctx.pos, sp.position);
                 if (!found || dist < bestDist) {
                     pos = sp.position;
@@ -359,11 +362,8 @@ library AIBehavior {
             ShipPosition memory sp = ctx.g.shipPositions[i];
             if (sp.shipId == ctx.shipId || sp.status != 0 || sp.isCreator)
                 continue; // own side only, not self
-            (Attributes memory attrs, bool found) = findAttributes(
-                ctx.g,
-                sp.shipId
-            );
-            if (!found) continue;
+            // sp.status == 0 already checked above (G-01) — direct index read.
+            Attributes memory attrs = ctx.g.shipAttributes[i];
             if (_manhattan(sp.position, ctx.pos) <= attrs.movement)
                 return true;
         }
@@ -380,11 +380,8 @@ library AIBehavior {
         for (uint i = 0; i < ctx.g.shipPositions.length; i++) {
             ShipPosition memory sp = ctx.g.shipPositions[i];
             if (sp.status != 0 || !sp.isCreator) continue;
-            (Attributes memory attrs, bool found) = findAttributes(
-                ctx.g,
-                sp.shipId
-            );
-            if (!found) continue;
+            // sp.status == 0 already checked above (G-01) — direct index read.
+            Attributes memory attrs = ctx.g.shipAttributes[i];
             uint16 dist = _manhattan(sp.position, tilePos);
             if (dist > attrs.range) continue;
             if (

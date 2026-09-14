@@ -1320,6 +1320,16 @@ contract Game is Ownable {
     }
 
     // View functions
+    //
+    // INVARIANT relied on by AIBehavior.sol/SinglePlayerMatch.sol/
+    // RoguelikeMatch.sol (G-01 gas fix): shipIds/shipAttributes and
+    // shipPositions (via getAllShipPositions) are both built from
+    // creatorActiveShipIds then joinerActiveShipIds, in that exact order —
+    // so for any index i with shipPositions[i].status == 0, shipIds[i] ==
+    // shipPositions[i].shipId and shipAttributes[i] is that ship's
+    // attributes, with no scan needed. Changing this construction order (or
+    // interleaving creator/joiner ships) would silently break those
+    // callers' direct index reads.
     function getGame(uint _gameId) public view returns (GameDataView memory) {
         _requireGameExists(_gameId);
 

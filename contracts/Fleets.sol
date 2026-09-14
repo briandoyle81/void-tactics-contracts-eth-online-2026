@@ -200,13 +200,14 @@ contract Fleets is Ownable, IFleets {
         Fleet storage fleet = fleets[_fleetId];
         if (fleet.id == 0) revert FleetNotFound();
 
-        // Find and remove the ship from the fleet
+        // Find and remove the ship from the fleet. Swap-and-pop — order
+        // doesn't matter here (fleet.shipIds is consumed purely as a
+        // membership list once a game has started; nothing indexes into it
+        // positionally) — same pattern as NodeMap._removeFromCampaignNodeIds
+        // and RoguelikeNodeMap.removeChild (G-02).
         for (uint i = 0; i < fleet.shipIds.length; i++) {
             if (fleet.shipIds[i] == _shipId) {
-                // Remove ship from array by shifting elements
-                for (uint j = i; j < fleet.shipIds.length - 1; j++) {
-                    fleet.shipIds[j] = fleet.shipIds[j + 1];
-                }
+                fleet.shipIds[i] = fleet.shipIds[fleet.shipIds.length - 1];
                 fleet.shipIds.pop();
 
                 // Read cost before releasing the ship from the fleet: a ship's cost

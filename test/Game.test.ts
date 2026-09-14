@@ -7176,4 +7176,74 @@ describe("Game", function () {
       expect(hasLOSBelow).to.be.true;
     });
   });
+
+  describe("Fleets.removeShipFromFleet (G-02)", function () {
+    it("removes a middle ship via swap-and-pop, preserving membership/cost/inFleet state for the rest", async function () {
+      const { fleets, ships, owner, creator, randomManager } =
+        await loadFixture(deployGameFixture);
+
+      // Purchase a tier-0 (5-ship) batch for creator: ships 1-5.
+      await ships.write.purchaseWithFlow(
+        [creator.account.address, 0n, owner.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      for (let i = 1; i <= 5; i++) {
+        const shipTuple = (await ships.read.ships([BigInt(i)])) as ShipTuple;
+        const ship = tupleToShip(shipTuple);
+        await randomManager.write.revealRandomness([
+          ship.traits.serialNumber,
+        ]);
+      }
+      await ships.write.constructAllMyShips({ account: creator.account });
+
+      // Bypass Lobbies and call Fleets directly so this test isolates
+      // removeShipFromFleet's swap-and-pop behavior specifically.
+      await fleets.write.setIsAllowedToManageFleets([
+        owner.account.address,
+        true,
+      ]);
+
+      const shipIds = [1n, 2n, 3n];
+      const shipCosts: number[] = [];
+      for (const id of shipIds) {
+        const shipTuple = (await ships.read.ships([id])) as ShipTuple;
+        shipCosts.push(tupleToShip(shipTuple).shipData.cost);
+      }
+      const totalCost = shipCosts.reduce((a, b) => a + b, 0);
+
+      await fleets.write.createFleet([
+        0n,
+        creator.account.address,
+        shipIds,
+        generateStartingPositions(shipIds, true),
+        BigInt(totalCost),
+        true,
+      ]);
+      const fleetId = await fleets.read.fleetCount();
+
+      // Remove the MIDDLE ship (id 2n at index 1) — exercises the actual
+      // swap (last element moved into the removed slot), not just a
+      // trivial pop of the last element.
+      await fleets.write.removeShipFromFleet([fleetId, 2n]);
+
+      const fleetAfter = await fleets.read.getFleet([fleetId]);
+      const remaining = [...fleetAfter.shipIds].map((id) => id.toString()).sort();
+      expect(remaining).to.deep.equal(["1", "3"]);
+      expect(fleetAfter.totalCost).to.equal(BigInt(shipCosts[0] + shipCosts[2]));
+
+      // Removed ship is released; the swapped-in and untouched ships stay in-fleet.
+      const removedShip = tupleToShip(
+        (await ships.read.ships([2n])) as ShipTuple,
+      );
+      const keptShip1 = tupleToShip(
+        (await ships.read.ships([1n])) as ShipTuple,
+      );
+      const keptShip3 = tupleToShip(
+        (await ships.read.ships([3n])) as ShipTuple,
+      );
+      expect(removedShip.shipData.inFleet).to.be.false;
+      expect(keptShip1.shipData.inFleet).to.be.true;
+      expect(keptShip3.shipData.inFleet).to.be.true;
+    });
+  });
 });

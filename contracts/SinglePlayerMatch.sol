@@ -348,12 +348,13 @@ contract SinglePlayerMatch is Ownable, IGameOrchestrator {
     function _hasAnyLiveShip(
         GameDataView memory g
     ) internal pure returns (bool) {
+        // Joiner ships occupy shipAttributes[creatorActiveShipIds.length ..]
+        // in the exact same order as joinerActiveShipIds — see Game.sol's
+        // getGame() construction order (G-01) — so this is a direct index
+        // read instead of an O(n) findAttributes scan per candidate.
+        uint base = g.creatorActiveShipIds.length;
         for (uint i = 0; i < g.joinerActiveShipIds.length; i++) {
-            (Attributes memory attrs, bool found) = AIBehavior.findAttributes(
-                g,
-                g.joinerActiveShipIds[i]
-            );
-            if (found && attrs.hullPoints > 0) return true;
+            if (g.shipAttributes[base + i].hullPoints > 0) return true;
         }
         return false;
     }
