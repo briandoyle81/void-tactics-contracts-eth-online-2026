@@ -235,31 +235,26 @@ contract Game is Ownable {
         uint _joinerFleetId
     ) internal {
         GameData storage game = games[_gameId];
+        // Creator/joiner sides were two copy-pasted loops — merged into one
+        // shared helper called per side (G-04 headroom fix), same behavior.
+        _registerFleetShips(_gameId, game.metadata.creator, _creatorFleetId);
+        _registerFleetShips(_gameId, game.metadata.joiner, _joinerFleetId);
+    }
 
-        // Get creator fleet ship IDs and positions, then calculate attributes
-        (uint[] memory creatorShipIds, ) = fleets.getFleetShipIdsAndPositions(
-            _creatorFleetId
+    // Shared body for _initializeFleetAttributes' two per-side loops: store
+    // this player's fleet ship IDs and calculate their attributes.
+    function _registerFleetShips(
+        uint _gameId,
+        address _player,
+        uint _fleetId
+    ) private {
+        GameData storage game = games[_gameId];
+        (uint[] memory shipIds, ) = fleets.getFleetShipIdsAndPositions(
+            _fleetId
         );
-        // Store creator ship IDs
-        for (uint i = 0; i < creatorShipIds.length; i++) {
-            EnumerableSet.add(
-                game.playerActiveShipIds[game.metadata.creator],
-                creatorShipIds[i]
-            );
-            calculateShipAttributes(_gameId, creatorShipIds[i]);
-        }
-
-        // Get joiner fleet ship IDs and positions, then calculate attributes
-        (uint[] memory joinerShipIds, ) = fleets.getFleetShipIdsAndPositions(
-            _joinerFleetId
-        );
-        // Store joiner ship IDs
-        for (uint i = 0; i < joinerShipIds.length; i++) {
-            EnumerableSet.add(
-                game.playerActiveShipIds[game.metadata.joiner],
-                joinerShipIds[i]
-            );
-            calculateShipAttributes(_gameId, joinerShipIds[i]);
+        for (uint i = 0; i < shipIds.length; i++) {
+            EnumerableSet.add(game.playerActiveShipIds[_player], shipIds[i]);
+            calculateShipAttributes(_gameId, shipIds[i]);
         }
     }
 
@@ -269,30 +264,23 @@ contract Game is Ownable {
         uint _creatorFleetId,
         uint _joinerFleetId
     ) internal {
-        // Get creator fleet ship IDs and positions
+        // Creator/joiner sides were two copy-pasted loops — merged into one
+        // shared helper called per side (G-04 headroom fix), same behavior.
+        _placeFleetShipsOnGrid(_gameId, _creatorFleetId);
+        _placeFleetShipsOnGrid(_gameId, _joinerFleetId);
+    }
+
+    // Shared body for _placeShipsOnGrid's two per-side loops: place this
+    // fleet's ships at their specified starting positions.
+    function _placeFleetShipsOnGrid(uint _gameId, uint _fleetId) private {
         (
-            uint[] memory creatorShipIds,
-            Position[] memory creatorPositions
-        ) = fleets.getFleetShipIdsAndPositions(_creatorFleetId);
+            uint[] memory shipIds,
+            Position[] memory positions
+        ) = fleets.getFleetShipIdsAndPositions(_fleetId);
 
-        // Place creator ships using their specified positions
-        for (uint i = 0; i < creatorShipIds.length; i++) {
-            uint shipId = creatorShipIds[i];
-            Position memory pos = creatorPositions[i];
-            _placeShipOnGrid(_gameId, shipId, pos.row, pos.col);
-        }
-
-        // Get joiner fleet ship IDs and positions
-        (
-            uint[] memory joinerShipIds,
-            Position[] memory joinerPositions
-        ) = fleets.getFleetShipIdsAndPositions(_joinerFleetId);
-
-        // Place joiner ships using their specified positions
-        for (uint i = 0; i < joinerShipIds.length; i++) {
-            uint shipId = joinerShipIds[i];
-            Position memory pos = joinerPositions[i];
-            _placeShipOnGrid(_gameId, shipId, pos.row, pos.col);
+        for (uint i = 0; i < shipIds.length; i++) {
+            Position memory pos = positions[i];
+            _placeShipOnGrid(_gameId, shipIds[i], pos.row, pos.col);
         }
     }
 
@@ -372,16 +360,6 @@ contract Game is Ownable {
         if (attributes.version == 0) revert ShipNotFound();
         if (_hullPoints > attributes.maxHullPoints) revert InvalidMove();
         attributes.hullPoints = _hullPoints;
-    }
-
-    // Calculate attributes for all ships in a fleet
-    function calculateFleetAttributes(
-        uint _gameId,
-        uint[] memory _shipIds
-    ) public {
-        for (uint i = 0; i < _shipIds.length; i++) {
-            calculateShipAttributes(_gameId, _shipIds[i]);
-        }
     }
 
     // Get ship attributes for a specific game
@@ -975,14 +953,16 @@ contract Game is Ownable {
 
         if (game.turnState.currentTurn == game.metadata.creator) {
             // Creator just moved, check if joiner has unmoved ships
-            bool joinerHasUnmovedShips = _checkPlayerHasUnmovedShips(
+            bool joinerHasUnmovedShips = _checkPlayerShips(
                 _gameId,
-                game.metadata.joiner
+                game.metadata.joiner,
+                true
             );
             // Also check if creator has no ships that can move (all 0 HP)
-            bool creatorHasMovableShips = _checkPlayerHasMovableShips(
+            bool creatorHasMovableShips = _checkPlayerShips(
                 _gameId,
-                game.metadata.creator
+                game.metadata.creator,
+                false
             );
 
             if (joinerHasUnmovedShips || !creatorHasMovableShips) {
@@ -990,14 +970,16 @@ contract Game is Ownable {
             }
         } else {
             // Joiner just moved, check if creator has unmoved ships
-            bool creatorHasUnmovedShips = _checkPlayerHasUnmovedShips(
+            bool creatorHasUnmovedShips = _checkPlayerShips(
                 _gameId,
-                game.metadata.creator
+                game.metadata.creator,
+                true
             );
             // Also check if joiner has no ships that can move (all 0 HP)
-            bool joinerHasMovableShips = _checkPlayerHasMovableShips(
+            bool joinerHasMovableShips = _checkPlayerShips(
                 _gameId,
-                game.metadata.joiner
+                game.metadata.joiner,
+                false
             );
 
             if (creatorHasUnmovedShips || !joinerHasMovableShips) {
@@ -1006,30 +988,16 @@ contract Game is Ownable {
         }
     }
 
-    // Helper function to check if a player has any ships that can move (not 0 HP)
-    function _checkPlayerHasMovableShips(
+    // Helper function to check if a player has any ships matching the given
+    // criterion. `_requireUnmoved` false == "can move" (_checkPlayerHasMovableShips'
+    // old behavior: any active ship); true == "has unmoved ships"
+    // (_checkPlayerHasUnmovedShips' old behavior: active AND not yet moved
+    // this round). Merged from two near-identical loops (G-04 headroom fix)
+    // — same external behavior at both call sites, one shared loop body.
+    function _checkPlayerShips(
         uint _gameId,
-        address _player
-    ) internal view returns (bool) {
-        GameData storage game = games[_gameId];
-        EnumerableSet.UintSet storage shipIds = game.playerActiveShipIds[
-            _player
-        ];
-
-        uint shipCount = EnumerableSet.length(shipIds);
-        for (uint i = 0; i < shipCount; i++) {
-            uint shipId = EnumerableSet.at(shipIds, i);
-            if (_isShipActive(_gameId, shipId)) {
-                return true; // Found at least one ship that can move
-            }
-        }
-        return false; // No ships that can move
-    }
-
-    // Helper function to check if a specific player has unmoved ships
-    function _checkPlayerHasUnmovedShips(
-        uint _gameId,
-        address _player
+        address _player,
+        bool _requireUnmoved
     ) internal view returns (bool) {
         GameData storage game = games[_gameId];
         EnumerableSet.UintSet storage shipIds = game.playerActiveShipIds[
@@ -1041,7 +1009,8 @@ contract Game is Ownable {
             uint shipId = EnumerableSet.at(shipIds, i);
             if (
                 _isShipActive(_gameId, shipId) &&
-                !EnumerableSet.contains(game.shipMovedThisRound, shipId)
+                (!_requireUnmoved ||
+                    !EnumerableSet.contains(game.shipMovedThisRound, shipId))
             ) {
                 return true;
             }
@@ -1250,12 +1219,14 @@ contract Game is Ownable {
         uint zeroHPShipCount = EnumerableSet.length(game.shipsWithZeroHP);
         for (uint i = 0; i < zeroHPShipCount; ) {
             uint shipId = EnumerableSet.at(game.shipsWithZeroHP, i);
-            if (
-                !(ships.isShipDestroyed(shipId)) &&
-                game.shipAttributes[shipId].hullPoints == 0
-            ) {
-                game.shipAttributes[shipId].reactorCriticalTimer++;
-                if (game.shipAttributes[shipId].reactorCriticalTimer >= 3) {
+            // Hold the storage reference once instead of re-indexing
+            // game.shipAttributes[shipId] (a mapping — each index recomputes
+            // a keccak256 slot, not just an SLOAD) up to three times per
+            // zero-HP ship, every round of every game (G-07).
+            Attributes storage attrs = game.shipAttributes[shipId];
+            if (!(ships.isShipDestroyed(shipId)) && attrs.hullPoints == 0) {
+                attrs.reactorCriticalTimer++;
+                if (attrs.reactorCriticalTimer >= 3) {
                     Ship memory ship = ships.getShip(shipId);
                     _removeShipFromGame(_gameId, shipId, false, ship);
                     // Set shrinks; re-check same index

@@ -67,7 +67,18 @@ contract DroneYard is Ownable, ReentrancyGuard {
         uint _shipId,
         Ship memory _newShip
     ) public view returns (uint) {
-        Ship memory currentShip = ships.getShip(_shipId);
+        return _calculateCostToModify(ships.getShip(_shipId), _newShip);
+    }
+
+    // G-05: split out of calculateCostToModify so modifyShip can pass in the
+    // Ship it already fetched once, instead of paying for a second
+    // cross-contract ships.getShip call for data that can't have changed
+    // within the same transaction. calculateCostToModify (above) stays as a
+    // standalone public preview entry point for the frontend.
+    function _calculateCostToModify(
+        Ship memory currentShip,
+        Ship memory _newShip
+    ) internal view returns (uint) {
         if (currentShip.id == 0) revert InvalidModification();
 
         uint totalModifications = _calculateTotalModifications(
@@ -105,7 +116,16 @@ contract DroneYard is Ownable, ReentrancyGuard {
         uint _shipId,
         Ship memory _newShip
     ) public view returns (bool) {
-        Ship memory currentShip = ships.getShip(_shipId);
+        return _validateShip(ships.getShip(_shipId), _newShip);
+    }
+
+    // G-05: split out of validateShip for the same reason as
+    // _calculateCostToModify above — lets modifyShip reuse the Ship it
+    // already fetched instead of a second redundant ships.getShip call.
+    function _validateShip(
+        Ship memory currentShip,
+        Ship memory _newShip
+    ) internal view returns (bool) {
         if (currentShip.id == 0) revert InvalidModification();
 
         // Validate trait values (must be 0, 1, or 2)
@@ -165,11 +185,12 @@ contract DroneYard is Ownable, ReentrancyGuard {
             revert ShipInFleet(_shipId);
         }
 
-        // Validate the modification
-        validateShip(_shipId, _newShip);
+        // Validate the modification — reuse currentShip (already fetched
+        // above) instead of validateShip's own ships.getShip call (G-05).
+        _validateShip(currentShip, _newShip);
 
-        // Calculate cost
-        uint cost = calculateCostToModify(_shipId, _newShip);
+        // Calculate cost — same reuse (G-05).
+        uint cost = _calculateCostToModify(currentShip, _newShip);
 
         // Check balance
         uint balance = universalCredits.balanceOf(msg.sender);

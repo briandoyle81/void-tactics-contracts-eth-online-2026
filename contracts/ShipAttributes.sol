@@ -97,16 +97,16 @@ contract ShipAttributes is IShipAttributes, Ownable {
         // Increase damage by the rank multiplier as a percentage (avoid overflow)
         calculatedBonus = (uint(attributes.gunDamage) * rankMultiplier) / 100;
         attributes.gunDamage += uint8(calculatedBonus);
-        attributes.hullPoints = _calculateHullPoints(_ship);
+        attributes.hullPoints = _calculateHullPoints(variantData, _ship);
         // Increase hull points by the rank multiplier as a percentage (avoid overflow)
         calculatedBonus = (uint(attributes.hullPoints) * rankMultiplier) / 100;
         attributes.hullPoints += uint8(calculatedBonus);
         attributes.maxHullPoints = attributes.hullPoints;
-        attributes.movement = _calculateMovement(_ship);
+        attributes.movement = _calculateMovement(variantData, _ship);
         // Increase movement by the rank multiplier as a percentage (avoid overflow)
         calculatedBonus = (uint(attributes.movement) * rankMultiplier) / 100;
         attributes.movement += uint8(calculatedBonus);
-        attributes.damageReduction = _calculateDamageReduction(_ship);
+        attributes.damageReduction = _calculateDamageReduction(variantData, _ship);
         // Increase damage reduction by the rank multiplier as a percentage (avoid overflow)
         calculatedBonus =
             (uint(attributes.damageReduction) * rankMultiplier) /
@@ -167,11 +167,9 @@ contract ShipAttributes is IShipAttributes, Ownable {
     // Internal calculation functions
 
     function _calculateHullPoints(
+        VariantAttributeData storage variantData,
         Ship memory _ship
     ) internal view returns (uint8) {
-        VariantAttributeData storage variantData = attributesVersions[
-            currentAttributesVersion
-        ].variantData[_ship.traits.variant];
         uint8 baseHull = variantData.baseHull;
         // uint8 traitBonus = _ship.traits.hull * 10; // Convert trait to hull points
         uint8 traitBonus = variantData.hull[_ship.traits.hull];
@@ -179,27 +177,25 @@ contract ShipAttributes is IShipAttributes, Ownable {
     }
 
     function _calculateMovement(
+        VariantAttributeData storage variantData,
         Ship memory _ship
     ) internal view returns (uint8) {
-        VariantAttributeData storage variant = attributesVersions[
-            currentAttributesVersion
-        ].variantData[_ship.traits.variant];
-        int8 baseMovement = int8(variant.baseSpeed);
+        int8 baseMovement = int8(variantData.baseSpeed);
 
         // Add trait bonus
-        baseMovement += int8(variant.engineSpeeds[_ship.traits.speed]);
+        baseMovement += int8(variantData.engineSpeeds[_ship.traits.speed]);
 
         // Extract equipment bonuses as int8 to avoid stack-too-deep or type mismatch
-        int8 gunMovement = variant
+        int8 gunMovement = variantData
             .guns[uint8(_ship.equipment.mainWeapon)]
             .movement;
-        int8 armorMovement = variant
+        int8 armorMovement = variantData
             .armors[uint8(_ship.equipment.armor)]
             .movement;
-        int8 shieldMovement = variant
+        int8 shieldMovement = variantData
             .shields[uint8(_ship.equipment.shields)]
             .movement;
-        int8 specialMovement = variant
+        int8 specialMovement = variantData
             .specials[uint8(_ship.equipment.special)]
             .movement;
 
@@ -213,12 +209,9 @@ contract ShipAttributes is IShipAttributes, Ownable {
     }
 
     function _calculateDamageReduction(
+        VariantAttributeData storage variantData,
         Ship memory _ship
     ) internal view returns (uint8) {
-        VariantAttributeData storage variantData = attributesVersions[
-            currentAttributesVersion
-        ].variantData[_ship.traits.variant];
-
         uint8 damageReduction = 0;
 
         damageReduction += variantData
