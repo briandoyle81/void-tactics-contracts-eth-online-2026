@@ -21,6 +21,11 @@ interface IGameResultsReader {
 /// doesn't exist.
 interface IGameReader {
     function getGame(uint _gameId) external view returns (GameDataView memory);
+    // G-04: resolveDraw only ever touches metadata fields — this avoids
+    // paying for getGame's full ship-data walk.
+    function getGameMetadataAndTurnState(
+        uint _gameId
+    ) external view returns (GameMetadata memory, GameTurnState memory);
 }
 
 /// @title Tournament
@@ -506,16 +511,17 @@ contract Tournament is Ownable, ReentrancyGuard {
         if (m.player1 == address(0) || m.player2 == address(0)) revert MatchNotReady();
         if (m.gameId == 0) revert GameNotAssigned();
 
-        GameDataView memory gd = game.getGame(m.gameId);
-        if (!gd.metadata.ended) revert GameNotComplete();
-        if (gd.metadata.winner != address(0)) revert NotADraw();
-        bool ok = (gd.metadata.creator == m.player1 && gd.metadata.joiner == m.player2) ||
-            (gd.metadata.creator == m.player2 && gd.metadata.joiner == m.player1);
+        (GameMetadata memory gameMetadata, ) = game
+            .getGameMetadataAndTurnState(m.gameId);
+        if (!gameMetadata.ended) revert GameNotComplete();
+        if (gameMetadata.winner != address(0)) revert NotADraw();
+        bool ok = (gameMetadata.creator == m.player1 && gameMetadata.joiner == m.player2) ||
+            (gameMetadata.creator == m.player2 && gameMetadata.joiner == m.player1);
         if (!ok) revert WinnerNotInMatch();
         // T-02: same reasoning as recordResult — require the game to have started
         // after both players were determined for this match (readyAt), so an old
         // pre-existing draw between the same two players can't be replayed here.
-        if (gd.metadata.startedAt <= m.readyAt) revert GamePredatesAssignment();
+        if (gameMetadata.startedAt <= m.readyAt) revert GamePredatesAssignment();
 
         address winner = t.seed[m.player1] <= t.seed[m.player2]
             ? m.player1

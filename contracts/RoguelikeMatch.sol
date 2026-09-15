@@ -441,7 +441,11 @@ contract RoguelikeMatch is Ownable, IGameOrchestrator {
         // re-reserving them, or _reserveRoster below would revert
         // MixedVariantFleet/ShipAlreadyInFleet trying to re-fleet a ship
         // that's still (nominally) in the just-finished combat fleet.
-        fleets.clearFleet(game.getGame(_gameId).metadata.creatorFleetId);
+        // getGameMetadataAndTurnState instead of getGame() — only
+        // .metadata.creatorFleetId is needed here (G-04).
+        (GameMetadata memory gameMetadata, ) = game
+            .getGameMetadataAndTurnState(_gameId);
+        fleets.clearFleet(gameMetadata.creatorFleetId);
 
         // Capture survivors' HP (auto-heal floor applied), drop anything
         // not found (destroyed, or individually retreated — either way

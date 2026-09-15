@@ -1291,6 +1291,23 @@ contract Game is Ownable {
     }
 
     // View functions
+
+    // Lightweight metadata/turn-state-only read (G-04): getGame() below is
+    // O(active+gone ships) by design (EnumerableSet walks, ship positions,
+    // moved-ship lists) — the right cost for a caller that actually needs
+    // ship data, but real overkill for callers (PvPMatch.flee/
+    // endGameOnTimeout, RoguelikeMatch's node-completion handler,
+    // Tournament.resolveDraw) that only ever touch metadata/turnState
+    // scalars. Both structs are plain value types (no nested mappings), so
+    // this is just two flat struct copies — O(1).
+    function getGameMetadataAndTurnState(
+        uint _gameId
+    ) external view returns (GameMetadata memory, GameTurnState memory) {
+        _requireGameExists(_gameId);
+        GameData storage game = games[_gameId];
+        return (game.metadata, game.turnState);
+    }
+
     //
     // INVARIANT relied on by AIBehavior.sol/SinglePlayerMatch.sol/
     // RoguelikeMatch.sol (G-01 gas fix): shipIds/shipAttributes and

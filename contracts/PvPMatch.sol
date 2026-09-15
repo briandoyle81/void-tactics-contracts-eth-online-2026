@@ -101,39 +101,47 @@ contract PvPMatch is Ownable, IGameOrchestrator {
 
     // Flee function - either player can end the game at any time
     function flee(uint _gameId) external {
-        GameDataView memory g = game.getGame(_gameId);
+        // Only metadata is touched here — getGameMetadataAndTurnState instead
+        // of getGame() avoids paying for a full ship-data walk (G-04).
+        (GameMetadata memory metadata, ) = game.getGameMetadataAndTurnState(
+            _gameId
+        );
 
         // Check if game has already ended (winner alone can't tell: a draw also
         // leaves winner == address(0), see GameMetadata.ended in Types.sol)
-        if (g.metadata.ended) revert InvalidMove();
+        if (metadata.ended) revert InvalidMove();
 
         // Must be either the creator or joiner
-        if (msg.sender != g.metadata.creator && msg.sender != g.metadata.joiner)
+        if (msg.sender != metadata.creator && msg.sender != metadata.joiner)
             revert NotInGame();
 
         // Set the other player as the winner
-        address winner = msg.sender == g.metadata.creator
-            ? g.metadata.joiner
-            : g.metadata.creator;
+        address winner = msg.sender == metadata.creator
+            ? metadata.joiner
+            : metadata.creator;
         game.forceEndSession(_gameId, winner, msg.sender);
     }
 
     // Force a loss when the current turn's player times out (only the other player can call this)
     function endGameOnTimeout(uint _gameId) external {
-        GameDataView memory g = game.getGame(_gameId);
+        // Only metadata/turnState are touched here (G-04, see flee above).
+        (
+            GameMetadata memory metadata,
+            GameTurnState memory turnState
+        ) = game.getGameMetadataAndTurnState(_gameId);
 
-        if (block.timestamp <= g.turnState.turnStartTime + g.turnState.turnTime)
+        if (block.timestamp <= turnState.turnStartTime + turnState.turnTime)
             revert TurnTimeoutNotReached();
 
         // Only the other player can force a timeout skip
-        if (msg.sender == g.turnState.currentTurn) revert InvalidMove();
+        if (msg.sender == turnState.currentTurn) revert InvalidMove();
 
         // Must be either the creator or joiner
-        if (msg.sender != g.metadata.creator && msg.sender != g.metadata.joiner)
+        if (msg.sender != metadata.creator && msg.sender != metadata.joiner)
             revert NotInGame();
 
         // End the game with the timed out player as the loser
-        game.forceEndSession(_gameId, msg.sender, g.turnState.currentTurn);
+        game.forceEndSession(_gameId, msg.sender, turnState.currentTurn);
     }
 
     // IGameOrchestrator: called by core Game.sol whenever a session this

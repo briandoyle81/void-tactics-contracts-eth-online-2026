@@ -280,7 +280,7 @@ GR-01 through GR-06 stay un-relitigated).
 
 Four more findings cleared the bar — three Significant, one Moderate.
 
-### G-04 — Four Orchestrator Call Sites Pay `Game.getGame()`'s Full O(active+gone ships) Cost Just to Read a Few `metadata`/`turnState` Scalars
+### ~~G-04 — Four Orchestrator Call Sites Pay `Game.getGame()`'s Full O(active+gone ships) Cost Just to Read a Few `metadata`/`turnState` Scalars~~
 
 **File:** `contracts/PvPMatch.sol`, `flee` (103-104) and `endGameOnTimeout` (122-123);
 `contracts/RoguelikeMatch.sol`, inline in the node-completion handler (444);
@@ -337,7 +337,47 @@ contracts a few bytes at most, likely nothing.
 **Headroom update 2026-09-15:** G-07 alone only freed 19 bytes — not enough. See G-08 below: a
 targeted follow-up sweep (dead-code removal + duplicated-loop dedup, unrelated to any specific
 finding above) freed **607 more bytes**, landing `Game.sol` at **23,950/24,576 bytes deployed
-(626 bytes of real headroom)**. G-04 is now unblocked — implementing next.
+(626 bytes of real headroom)**. G-04 is now unblocked — implemented below.
+
+**Status: Fixed 2026-09-15.** Added `getGameMetadataAndTurnState(uint _gameId)` to `Game.sol`
+exactly as suggested — `_requireGameExists` then `return (game.metadata, game.turnState);`, two
+flat struct copies, no loops. Switched all four call sites: `PvPMatch.flee`/`endGameOnTimeout` now
+destructure `(GameMetadata memory metadata, GameTurnState memory turnState)` instead of the full
+`GameDataView`; `RoguelikeMatch`'s node-completion handler now destructures just the metadata it
+needs for `fleets.clearFleet(gameMetadata.creatorFleetId)`; `Tournament.sol`'s `IGameReader`
+interface (a project-local minimal interface for the deployed `Game` contract) gained a matching
+`getGameMetadataAndTurnState` signature, and `resolveDraw` was switched to it. Every field
+reference at all four call sites was re-verified against current source before touching anything
+(re-confirmed `Tournament.resolveDraw` also reads `.startedAt`, not just the three fields the
+original finding listed — still just a `.metadata` field, covered either way).
+
+Bytecode measured: `Game.sol` **24,329/24,576 bytes deployed (247 bytes headroom left)** — the new
+function cost 379 bytes, more than the "100+ bytes" estimate but comfortably inside the 626-byte
+budget G-08 freed. The bigger surprise was on the caller side: the doc predicted "a few bytes at
+most, likely nothing" for `PvPMatch`/`Tournament`, but both **shrank substantially** —
+`PvPMatch.sol` 5.153 → 3.506 KiB deployed (−1.647 KiB), `Tournament.sol` 17.839 → 16.259 KiB
+deployed (−1.580 KiB). Reason, confirmed by reasoning through Solidity's codegen: `GameDataView`
+contains several dynamic arrays (`shipAttributes`, `shipPositions`, `shipIds`,
+`creatorActiveShipIds`, `joinerActiveShipIds`, `creatorMovedShipIds`, `joinerMovedShipIds`) —
+decoding that full return type at a call site needs real ABI-decode bytecode, which the compiler
+was generating at every `getGame()` call site in these files. `GameMetadata`/`GameTurnState` are
+plain fixed-size structs, so their decode routine is far smaller — removing the last/only
+`getGame()` call in each of these two files eliminated the large decoder entirely, not just
+shrunk it. `RoguelikeMatch.sol` grew slightly (21.686 → 21.744 KiB, +59 bytes) since it still has
+a separate `getGame()` call elsewhere (`takeAITurn`, which genuinely needs ship data) — it pays
+for both decoders now, a net addition as expected.
+
+Verified genuine: existing test suites already exercise all four call sites end-to-end
+(`test/PvPMatch.test.ts`, `test/RoguelikeMatch.test.ts`, `test/Tournament.test.ts` — 137 tests
+combined across the four affected files, all passing with zero rewrites, confirming this is a
+behavior-preserving refactor). Deliberately broke each of the three non-`Game.sol` call sites the
+way a plausible field-mixup would look: swapped `PvPMatch.flee`'s winner-selection ternary
+(assigns the *caller* as winner instead of the other player), swapped `RoguelikeMatch`'s fleet
+clear to `joinerFleetId` instead of `creatorFleetId`, and dropped one branch of
+`Tournament.resolveDraw`'s `ok` check (only accepted one creator/joiner-vs-player1/player2
+ordering instead of both). Confirmed **12 tests went red** across the three files. Restored all
+three from backups and reconfirmed byte-identical. Full suite re-run afterward: exit code 0, no
+regressions (`PRODUCTION` confirmed `false` beforehand).
 
 ### ~~G-05 — `DroneYard.modifyShip` Fetches `ships.getShip(_shipId)` Three Separate Times for the Same Immutable-Within-the-Call Ship~~
 
