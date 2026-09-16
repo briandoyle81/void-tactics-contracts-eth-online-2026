@@ -68,11 +68,16 @@ contract ElectricStormResolver is IEffectResolver {
         int16 actingRow,
         int16 actingCol
     ) external view returns (SpecialEffect[] memory effects) {
+        // HA3-06: int8(uint8) silently wraps negative for strength >= 128,
+        // inverting "add to reactor timer" into "subtract from it." Clamp
+        // to int8's max instead of letting a misconfigured value flip sign.
+        uint8 rawStrength = shipAttributes.getSpecialStrength(slot, variant);
+        int8 clampedStrength = rawStrength > 127 ? int8(127) : int8(rawStrength);
         StormContext memory ctx = StormContext({
             actingRow: actingRow,
             actingCol: actingCol,
             range: shipAttributes.getSpecialRange(slot, variant),
-            strength: int8(shipAttributes.getSpecialStrength(slot, variant))
+            strength: clampedStrength
         });
 
         ShipPosition[] memory positions = game.getAllShipPositions(gameId);

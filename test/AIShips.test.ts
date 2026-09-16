@@ -199,6 +199,50 @@ describe("AIShips", function () {
     });
   });
 
+  describe("releaseShips double-release guard (HA3-04)", function () {
+    it("does not duplicate a slot in freeSlots when the same ship is released twice", async function () {
+      const { minterAiShips, aiShips, other } = await loadFixture(
+        deployFixture,
+      );
+
+      await minterAiShips.write.allocateShip([
+        other.account.address,
+        shipTemplate({ name: "A" }),
+      ]);
+      const idA = AI_SHIP_ID_OFFSET + 1n;
+
+      await minterAiShips.write.releaseShips([[idA]]);
+      expect(await aiShips.read.freeSlotCount()).to.equal(1n);
+
+      // Redundant release of the same, already-free ship id — without the
+      // fix this would push a second copy of the same localId onto
+      // freeSlots, letting it be handed out twice.
+      await minterAiShips.write.releaseShips([[idA]]);
+      expect(await aiShips.read.freeSlotCount()).to.equal(1n);
+
+      // Draining the pool now must yield exactly one reused id (A's), then
+      // grow past slotCount=1 for the next allocation — never hand out A's
+      // id a second time.
+      await minterAiShips.write.allocateShip([
+        other.account.address,
+        shipTemplate({ name: "B" }),
+      ]);
+      expect(await aiShips.read.freeSlotCount()).to.equal(0n);
+      expect(await aiShips.read.slotCount()).to.equal(1n);
+
+      await minterAiShips.write.allocateShip([
+        other.account.address,
+        shipTemplate({ name: "C" }),
+      ]);
+      expect(await aiShips.read.slotCount()).to.equal(2n);
+
+      const shipB = await aiShips.read.getShip([idA]);
+      const shipC = await aiShips.read.getShip([AI_SHIP_ID_OFFSET + 2n]);
+      expect(shipB.name).to.equal("B");
+      expect(shipC.name).to.equal("C");
+    });
+  });
+
   describe("router-gated functions", function () {
     it("markDestroyed/recordKill/setInFleet revert when called by anyone other than the configured router", async function () {
       const { minterAiShips, otherAiShips, other } =

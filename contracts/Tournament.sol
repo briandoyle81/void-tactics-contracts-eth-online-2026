@@ -452,6 +452,22 @@ contract Tournament is Ownable, ReentrancyGuard {
         Match storage m = t.bracket[matchId];
         if (m.resolved) revert MatchAlreadyResolved();
         if (m.player1 == address(0) || m.player2 == address(0)) revert MatchNotReady();
+        // HA3-03: assignment is sticky (once set, never reassignable) and
+        // validated up front — otherwise a match's own losing player could
+        // clobber a correct assignment with garbage forever, blocking both
+        // recordResult/resolveDraw AND claimForfeitWin/resolveStalledMatch
+        // (both require gameId == 0, which nothing else can ever restore),
+        // permanently freezing this match and, transitively, the entire
+        // bracket and prize pool above it. Same participant/timing checks
+        // recordResult/resolveDraw already re-verify independently, moved
+        // up front so a bad gameId can never be accepted in the first place.
+        if (m.gameId != 0) revert GameAlreadyAssigned();
+        (GameMetadata memory gameMetadata, ) = game
+            .getGameMetadataAndTurnState(gameId);
+        bool ok = (gameMetadata.creator == m.player1 && gameMetadata.joiner == m.player2) ||
+            (gameMetadata.creator == m.player2 && gameMetadata.joiner == m.player1);
+        if (!ok) revert WinnerNotInMatch();
+        if (gameMetadata.startedAt <= m.readyAt) revert GamePredatesAssignment();
         m.gameId = gameId;
         emit MatchGameAssigned(tournamentId, matchId, gameId);
     }

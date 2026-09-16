@@ -29,6 +29,17 @@ contract AIShips is Ownable, IAIShips {
     mapping(uint => Ship) private ships; // keyed by LOCAL id, 1-indexed
     uint public slotCount;
     uint[] public freeSlots;
+    // HA3-04: per-slot free/in-use tracking, keyed by LOCAL id. Defaults to
+    // false for both "currently allocated" and "never yet allocated" slots,
+    // which is correct either way — only set true while a slot actually sits
+    // in freeSlots. Lets releaseShips detect (and skip, not corrupt state
+    // over) a redundant release instead of silently duplicating a slot in
+    // freeSlots, which would let allocateShip hand the same globalId out
+    // twice. Not currently reachable (Game._endGame's single-invocation
+    // guard — see pre-audit.md L-08 — means onGameEnded, the only caller of
+    // releaseShips, can't fire twice for one game), but defense-in-depth
+    // per this project's "assume hostile/buggy callers" standing rule.
+    mapping(uint => bool) private isFreeSlot;
 
     address public router;
     mapping(address => bool) public isAllowedToCreateShips;
@@ -70,6 +81,7 @@ contract AIShips is Ownable, IAIShips {
         if (freeCount > 0) {
             localId = freeSlots[freeCount - 1];
             freeSlots.pop();
+            isFreeSlot[localId] = false;
         } else {
             slotCount++;
             localId = slotCount;
@@ -107,7 +119,14 @@ contract AIShips is Ownable, IAIShips {
     function releaseShips(uint[] calldata _shipIds) external {
         if (!isAllowedToCreateShips[msg.sender]) revert NotAuthorized(msg.sender);
         for (uint i = 0; i < _shipIds.length; i++) {
-            freeSlots.push(_shipIds[i] - AI_SHIP_ID_OFFSET);
+            uint localId = _shipIds[i] - AI_SHIP_ID_OFFSET;
+            // Skip (don't revert the whole batch over) an already-free
+            // slot — same griefing-resistant reasoning as
+            // RandomManager.revealRandomnessBatch and Fleets.clearFleet's
+            // idempotent-redundant-call handling elsewhere in this repo.
+            if (isFreeSlot[localId]) continue;
+            isFreeSlot[localId] = true;
+            freeSlots.push(localId);
         }
     }
 

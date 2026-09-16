@@ -18,6 +18,16 @@ const config: HardhatUserConfig = {
             enabled: true,
             runs: 1,
           },
+          // Dev-only, no effect on deployed bytecode: emits an authoritative
+          // slot/offset map per contract (artifacts/.../<Contract>.json's
+          // .storageLayout), used to cross-check hand-derived storage slots
+          // for test-only EVM storage manipulation (see test/helpers/
+          // gameStorage.ts).
+          outputSelection: {
+            "*": {
+              "*": ["storageLayout"],
+            },
+          },
         },
       },
       {

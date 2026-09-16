@@ -112,6 +112,16 @@ contract ShipAttributes is IShipAttributes, Ownable {
             (uint(attributes.damageReduction) * rankMultiplier) /
             100;
         attributes.damageReduction += uint8(calculatedBonus);
+        // Cap at 100% (HA3-02): every damage-reduction consumer computes
+        // `baseDamage - (baseDamage * reduction) / 100`, which underflows
+        // and reverts once reduction exceeds 100 instead of flooring at 0
+        // damage — an uncapped value here (reachable via armor+shield
+        // configuration alone, before the rank bonus above can push it
+        // higher still) would make a ship permanently unshootable rather
+        // than just very resistant.
+        if (attributes.damageReduction > 100) {
+            attributes.damageReduction = 100;
+        }
         // Initialize empty status effects array
         attributes.statusEffects = new uint8[](0);
 

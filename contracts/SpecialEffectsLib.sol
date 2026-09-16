@@ -28,6 +28,7 @@ library SpecialEffectsLib {
 
     error ShipNotFound();
     error ShipDestroyed();
+    error RelocationDestinationOccupied();
 
     // Bundled to keep resolveAndApply's own parameter/local count low
     // (Solidity's legacy codegen runs out of stack slots quickly across a
@@ -240,6 +241,17 @@ library SpecialEffectsLib {
             int16 newCol = int16(_positions[i] % 1000);
             Position storage p = game.shipPositions[_shipIds[i]].position;
             game.grid[p.row][p.col] = 0;
+            // HA3-05: every other grid-write path in this codebase (moveShip,
+            // _placeShipOnGrid) rejects an occupied destination — this one
+            // didn't. Checked after clearing the source cell above (so a
+            // relocation landing back on its own current cell, or onto a
+            // cell a same-batch removal just cleared, is still valid) but
+            // before writing, so a genuine collision reverts instead of
+            // silently desyncing grid from shipPositions with no way to
+            // detect or repair it later.
+            if (game.grid[newRow][newCol] != 0) {
+                revert RelocationDestinationOccupied();
+            }
             game.grid[newRow][newCol] = _shipIds[i];
             p.row = newRow;
             p.col = newCol;

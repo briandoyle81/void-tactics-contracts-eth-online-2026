@@ -200,6 +200,72 @@ describe("Effect resolver target-status validation (SP-02)", function () {
     });
   });
 
+  describe("Reactor-timer strength clamping (HA3-06)", function () {
+    it("EMPResolver clamps a >=128 strength to 127 instead of wrapping negative", async function () {
+      const gameView = await deployGameView();
+      // MockShipAttributesSpecial(range, strength) — 200 would wrap to -56
+      // via a raw int8(uint8(200)) cast.
+      const shipAttrs = await hre.viem.deployContract(
+        "MockShipAttributesSpecial",
+        [5, 200],
+      );
+      const resolver = await hre.viem.deployContract("EMPResolver", [
+        gameView.address,
+        shipAttrs.address,
+        1, // Special.Slot1
+      ]);
+      await gameView.write.setShipPosition([
+        GAME_ID,
+        ACTING_SHIP_ID,
+        actingPosition,
+      ]);
+      await gameView.write.setShipPosition([
+        GAME_ID,
+        TARGET_SHIP_ID,
+        targetPosition(0),
+      ]);
+
+      const effects = await resolver.read.resolveEffect([
+        GAME_ID,
+        ACTING_SHIP_ID,
+        1,
+        TARGET_SHIP_ID,
+        0,
+        0,
+      ]);
+      expect(effects[0].reactorTimerDelta).to.equal(127);
+    });
+
+    it("ElectricStormResolver clamps a >=128 strength to 127 instead of wrapping negative", async function () {
+      const gameView = await deployGameView();
+      const shipAttrs = await hre.viem.deployContract(
+        "MockShipAttributesSpecial",
+        [5, 200],
+      );
+      const resolver = await hre.viem.deployContract("ElectricStormResolver", [
+        gameView.address,
+        shipAttrs.address,
+        1, // Special.Slot1
+      ]);
+      await gameView.write.setShipPosition([
+        GAME_ID,
+        ACTING_SHIP_ID,
+        actingPosition,
+      ]);
+
+      const effects = await resolver.read.resolveEffect([
+        GAME_ID,
+        ACTING_SHIP_ID,
+        1,
+        0,
+        actingPosition.position.row,
+        actingPosition.position.col,
+      ]);
+      expect(effects.length).to.equal(1);
+      expect(effects[0].reactorTimerDelta).to.equal(127);
+    });
+  });
+
   describe("RamResolver", function () {
     async function deployResolver(gameView: any) {
       return hre.viem.deployContract("RamResolver", [gameView.address]);

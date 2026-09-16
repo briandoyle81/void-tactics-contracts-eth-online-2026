@@ -10,6 +10,11 @@ import {
   MapMode,
 } from "./types";
 import DeployModule from "../ignition/modules/DeployAndConfig";
+import {
+  setShipPosition,
+  setShipHullPointsToZero,
+  primeShipForRealDestruction,
+} from "./helpers/gameStorage";
 
 // Node-match game ids live in a disjoint range above Lobbies-sourced (PvP)
 // ids — see SinglePlayerMatch.sol's NODE_MATCH_ID_OFFSET. Every test below
@@ -245,9 +250,7 @@ describe("SinglePlayerMatch", function () {
     // applies: stay and fire.
     const humanShipId = 1n;
     const aiShipId = AI_SHIP_ID_OFFSET + 1n;
-    await game.write.debugSetShipPosition([gameId, humanShipId, 0, 15], {
-      account: owner.account,
-    });
+    await setShipPosition(game.address, gameId, humanShipId, 0, 15);
     const humanAttrsBefore = await game.read.getShipAttributes([
       gameId,
       humanShipId,
@@ -747,9 +750,7 @@ describe("SinglePlayerMatch", function () {
       );
 
       const aiShipId = AI_SHIP_ID_OFFSET + 1n;
-      await game.write.debugSetShipPosition([gameId, 1n, 0, 14], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, gameId, 1n, 0, 14);
       await humanGame.write.moveShip([gameId, 1n, 0, 14, ActionType.Pass, 0n], {
         account: human.account,
       });
@@ -809,12 +810,8 @@ describe("SinglePlayerMatch", function () {
       // Reposition both ships (away from the fixed fleet-setup corner) so
       // there's room to observe a retreat: Sniper at (5,10), enemy adjacent
       // at (5,9).
-      await game.write.debugSetShipPosition([gameId, aiShipId, 5, 10], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([gameId, 1n, 5, 9], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, gameId, aiShipId, 5, 10);
+      await setShipPosition(game.address, gameId, 1n, 5, 9);
       await humanGame.write.moveShip([gameId, 1n, 5, 9, ActionType.Pass, 0n], {
         account: human.account,
       });
@@ -875,12 +872,8 @@ describe("SinglePlayerMatch", function () {
       );
 
       const aiShipId = AI_SHIP_ID_OFFSET + 1n;
-      await game.write.debugSetShipPosition([gameId, aiShipId, 5, 10], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([gameId, 1n, 5, 8], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, gameId, aiShipId, 5, 10);
+      await setShipPosition(game.address, gameId, 1n, 5, 8);
       await humanGame.write.moveShip([gameId, 1n, 5, 8, ActionType.Pass, 0n], {
         account: human.account,
       });
@@ -963,12 +956,8 @@ describe("SinglePlayerMatch", function () {
       const healerShipId = AI_SHIP_ID_OFFSET + 1n;
       const allyShipId = AI_SHIP_ID_OFFSET + 2n;
 
-      await game.write.debugSetHullPointsToZero([gameId, allyShipId], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([gameId, 1n, 0, 13], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, gameId, allyShipId);
+      await setShipPosition(game.address, gameId, 1n, 0, 13);
       await humanGame.write.moveShip([gameId, 1n, 0, 13, ActionType.Pass, 0n], {
         account: human.account,
       });
@@ -1032,9 +1021,7 @@ describe("SinglePlayerMatch", function () {
 
       const aiShipId = AI_SHIP_ID_OFFSET + 1n;
       // Keep the human ship far away, out of any plausible gun range.
-      await game.write.debugSetShipPosition([gameId, 1n, 10, 0], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, gameId, 1n, 10, 0);
       await humanGame.write.moveShip([gameId, 1n, 10, 0, ActionType.Pass, 0n], {
         account: human.account,
       });
@@ -1105,9 +1092,7 @@ describe("SinglePlayerMatch", function () {
       );
 
       const aiShipId = AI_SHIP_ID_OFFSET + 1n;
-      await game.write.debugSetShipPosition([gameId, 1n, 0, 13], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, gameId, 1n, 0, 13);
       await humanGame.write.moveShip([gameId, 1n, 0, 13, ActionType.Pass, 0n], {
         account: human.account,
       });
@@ -1202,9 +1187,7 @@ describe("SinglePlayerMatch", function () {
       // successfully move (moveShip reverts ShipDestroyed for any
       // non-Retreat action at 0 HP), so it never entered
       // joinerMovedShipIds and every other ship behind it was unreachable.
-      await game.write.debugSetHullPointsToZero([gameId, deadAiShipId], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, gameId, deadAiShipId);
 
       const preGameData = (await game.read.getGame([gameId])) as GameDataView;
       const preRound = preGameData.turnState.currentRound;
@@ -1271,9 +1254,7 @@ describe("SinglePlayerMatch", function () {
       // meaningfully do (its only legal action, Retreat, isn't a decision
       // worth making — see takeAITurn's comment), so it should surrender
       // rather than deadlock the match.
-      await game.write.debugSetHullPointsToZero([gameId, aiShipId], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, gameId, aiShipId);
 
       await singlePlayerMatchOther.write.takeAITurn([gameId]);
 
@@ -1325,9 +1306,10 @@ describe("SinglePlayerMatch", function () {
         [gameId, 1n, 0, 0, ActionType.Pass, 0n],
         { account: human.account },
       );
-      await game.write.debugSetHullPointsToZero(
-        [gameId, AI_SHIP_ID_OFFSET + 1n],
-        { account: owner.account },
+      await setShipHullPointsToZero(
+        game.address,
+        gameId,
+        AI_SHIP_ID_OFFSET + 1n,
       );
       await singlePlayerMatchOther.write.takeAITurn([gameId]);
 
@@ -1350,6 +1332,7 @@ describe("SinglePlayerMatch", function () {
         humanShips,
         humanGame,
         humanSinglePlayerMatch,
+        singlePlayerMatchOther,
         human,
       } = await loadFixture(deploySinglePlayerFixture);
 
@@ -1364,10 +1347,27 @@ describe("SinglePlayerMatch", function () {
       ]);
       const gameId = NODE_MATCH_ID_OFFSET + 1n;
 
-      // Force the AI to win directly via forceEndSession's sibling path:
-      // simplest is debugDestroyShip on the human's only ship, which
-      // triggers _checkGameEndCondition -> _endGame with the AI as winner.
-      await game.write.debugDestroyShip([gameId, 1n]);
+      // Force the AI to win via the real reactor-critical-timer removal
+      // path (debugDestroyShip is gone — see docs/audit-2.md I-01). Human
+      // passes first (ship 1 is still full HP here, so Pass is legal and
+      // hands the turn to the AI naturally) — priming BEFORE any move would
+      // leave the human's only ship unmovable at turn 0 with nothing having
+      // ever handed the turn to the AI, a deadlock real gameplay could never
+      // reach in the first place. Only after that real move is ship 1 primed
+      // for destruction. The AI's own real move then completes round 1;
+      // within that same transaction Game.sol's own
+      // _incrementReactorCriticalTimerForZeroHPShips takes ship 1's
+      // reactorCriticalTimer from 2 to 3 and calls the real
+      // _removeShipFromGame, which triggers _checkGameEndCondition ->
+      // _endGame with the AI as winner — exactly what debugDestroyShip's
+      // instant removal used to produce, just reached through the actual
+      // production code path instead of a debug shortcut.
+      await humanGame.write.moveShip(
+        [gameId, 1n, 0, 0, ActionType.Pass, 0n],
+        { account: human.account },
+      );
+      await primeShipForRealDestruction(game.address, gameId, 1n);
+      await singlePlayerMatchOther.write.takeAITurn([gameId]);
 
       const gameData = (await game.read.getGame([gameId])) as GameDataView;
       expect(gameData.metadata.ended).to.equal(true);

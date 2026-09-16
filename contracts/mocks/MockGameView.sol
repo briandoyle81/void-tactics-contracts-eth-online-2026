@@ -9,6 +9,13 @@ import "../Types.sol";
 contract MockGameView {
     mapping(uint => mapping(uint => ShipPosition)) private positions;
     mapping(uint => mapping(uint => Attributes)) private attrs;
+    // Tracks every shipId ever set per game, so getAllShipPositions (needed
+    // by FlakArrayResolver/DroneSwarmResolver/ElectricStormResolver's
+    // AoE scans — see HA3-06's test) can return something real instead of
+    // the previously-hardcoded empty array. Idempotent: re-setting an
+    // already-registered shipId's position doesn't duplicate it here.
+    mapping(uint => uint[]) private shipIdsByGame;
+    mapping(uint => mapping(uint => bool)) private shipIdRegistered;
 
     function setShipPosition(
         uint _gameId,
@@ -16,6 +23,10 @@ contract MockGameView {
         ShipPosition calldata _position
     ) external {
         positions[_gameId][_shipId] = _position;
+        if (!shipIdRegistered[_gameId][_shipId]) {
+            shipIdRegistered[_gameId][_shipId] = true;
+            shipIdsByGame[_gameId].push(_shipId);
+        }
     }
 
     function setShipAttributes(
@@ -41,8 +52,12 @@ contract MockGameView {
     }
 
     function getAllShipPositions(
-        uint /* _gameId */
-    ) external pure returns (ShipPosition[] memory) {
-        return new ShipPosition[](0);
+        uint _gameId
+    ) external view returns (ShipPosition[] memory result) {
+        uint[] storage ids = shipIdsByGame[_gameId];
+        result = new ShipPosition[](ids.length);
+        for (uint i = 0; i < ids.length; i++) {
+            result[i] = positions[_gameId][ids[i]];
+        }
     }
 }

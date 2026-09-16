@@ -390,7 +390,7 @@ contract Game is Ownable {
     //
     // Reads active ships from playerActiveShipIds + shipPositions instead of
     // scanning the grid: both are already kept in lockstep with the grid on
-    // every move (moveShip/debugSetShipPosition) and every removal
+    // every move (moveShip) and every removal
     // (_removeShipFromGame atomically clears a ship from the grid AND from
     // playerActiveShipIds), so a ship in playerActiveShipIds is guaranteed
     // alive and exactly where shipPositions says it is. That makes an O(grid
@@ -1238,56 +1238,6 @@ contract Game is Ownable {
             }
             i++;
         }
-    }
-
-    function debugDestroyShip(uint _gameId, uint _shipId) external onlyOwner {
-        Ship memory ship = ships.getShip(_shipId);
-        _removeShipFromGame(_gameId, _shipId, false, ship);
-    }
-
-    // Debug function to set a ship's hull points to 0 (onlyOwner for testing)
-    function debugSetHullPointsToZero(
-        uint _gameId,
-        uint _shipId
-    ) external onlyOwner {
-        GameData storage game = games[_gameId];
-
-        // Set hull points to 0
-        _setShipHPToZero(_gameId, _shipId);
-
-        // Don't remove ship from grid to allow testing scenarios where we want
-        // to simulate 0 hull points but still have the ship in the game for repair
-
-        // Remove ship from moved set since it's no longer active
-        EnumerableSet.remove(game.shipMovedThisRound, _shipId);
-
-        // Note: We don't remove from playerActiveShipIds to allow testing scenarios
-        // where we want to simulate 0 hull points but still have the ship participate
-        // in round completion logic (for reactor critical timer increments)
-        // We don't call _checkGameEndCondition here to allow testing scenarios
-        // where we want to simulate 0 hull points without ending the game
-    }
-
-    // Debug function to set a ship in a specific position (onlyOwner for testing)
-    function debugSetShipPosition(
-        uint _gameId,
-        uint _shipId,
-        int16 _row,
-        int16 _col
-    ) external onlyOwner {
-        // No checks needed for debug, assume correct info given
-        GameData storage game = games[_gameId];
-
-        // Clear old position in grid
-        Position storage oldPosition = game.shipPositions[_shipId].position;
-        game.grid[oldPosition.row][oldPosition.col] = 0;
-
-        // Set ship position
-        game.shipPositions[_shipId].position = Position(_row, _col);
-        game.shipPositions[_shipId].status = 0;
-
-        // Set ship in grid
-        game.grid[_row][_col] = _shipId;
     }
 
     // View functions

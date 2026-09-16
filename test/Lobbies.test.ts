@@ -2044,6 +2044,73 @@ describe("Lobbies", function () {
       );
     });
 
+    it("lets the owner withdraw locked UTC reservation fees (HA3-01)", async function () {
+      const {
+        creatorLobbies,
+        joiner,
+        universalCredits,
+        shipPurchaser,
+        creator,
+        lobbies,
+        owner,
+      } = await loadFixture(deployLobbiesFixture);
+
+      const ownerLobbies = await hre.viem.getContractAt(
+        "Lobbies",
+        lobbies.address,
+        { client: { wallet: owner } }
+      );
+      await ownerLobbies.write.setUniversalCreditsAddress([
+        universalCredits.address,
+      ]);
+
+      await shipPurchaser.write.purchaseUTCWithFlow(
+        [creator.account.address, 1n],
+        { value: parseEther("9.99"), account: creator.account }
+      );
+      await universalCredits.write.approve([lobbies.address, parseEther("1")], {
+        account: creator.account,
+      });
+      await creatorLobbies.write.createLobby([
+        1000n,
+        300n,
+        true,
+        0n,
+        100n,
+        joiner.account.address, // reservedJoiner - locks 1 UTC
+      ]);
+
+      // Non-owner can't withdraw.
+      const joinerLobbiesForWithdraw = await hre.viem.getContractAt(
+        "Lobbies",
+        lobbies.address,
+        { client: { wallet: joiner } }
+      );
+      await expect(
+        joinerLobbiesForWithdraw.write.withdrawUC([joiner.account.address])
+      ).to.be.rejectedWith("OwnableUnauthorizedAccount");
+
+      // Without this fix, the 1 UTC locked above had no recovery path at
+      // all — confirm it's now fully recoverable to an arbitrary recipient.
+      const contractBalanceBefore = await universalCredits.read.balanceOf([
+        lobbies.address,
+      ]);
+      expect(contractBalanceBefore).to.equal(parseEther("1"));
+
+      const recipient = owner.account.address;
+      const recipientBalanceBefore = await universalCredits.read.balanceOf([
+        recipient,
+      ]);
+      await ownerLobbies.write.withdrawUC([recipient]);
+
+      expect(
+        await universalCredits.read.balanceOf([lobbies.address])
+      ).to.equal(0n);
+      expect(
+        await universalCredits.read.balanceOf([recipient])
+      ).to.equal(recipientBalanceBefore + parseEther("1"));
+    });
+
     it("should not allow non-reserved player to join reserved lobby", async function () {
       const {
         creatorLobbies,

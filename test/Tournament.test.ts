@@ -121,6 +121,54 @@ describe("Tournament", function () {
     await hre.network.provider.send("evm_mine", []);
   }
 
+  // Creates a real, started PvP game between playerA/playerB (no moves
+  // needed — Game.startGame sets metadata.startedAt as soon as both fleets
+  // exist) and returns its gameId. Used to give assignMatchGame (HA3-03) a
+  // genuinely valid game to assign, instead of an unvalidated fake id.
+  async function createRealGameBetween(
+    deployed: any,
+    playerA: any,
+    playerB: any
+  ): Promise<bigint> {
+    const { ships, lobbies, randomManager } = deployed;
+    await ships.write.purchaseWithFlow(
+      [playerA.account.address, 0, playerB.account.address, 1],
+      { value: parseEther("4.99") }
+    );
+    await ships.write.purchaseWithFlow(
+      [playerB.account.address, 0, playerA.account.address, 1],
+      { value: parseEther("4.99") }
+    );
+    for (let i = 1; i <= 10; i++) {
+      const shipTuple = (await ships.read.ships([BigInt(i)])) as ShipTuple;
+      const ship = tupleToShip(shipTuple);
+      await randomManager.write.revealRandomness([ship.traits.serialNumber]);
+    }
+    await ships.write.constructAllMyShips({ account: playerA.account });
+    await ships.write.constructAllMyShips({ account: playerB.account });
+
+    await lobbies.write.createLobbyForAddresses([
+      playerA.account.address,
+      playerB.account.address,
+      1000n,
+      300n,
+      0n,
+      100n,
+    ]);
+    const lobbyId = await lobbies.read.lobbyCount();
+
+    await lobbies.write.createFleet(
+      [lobbyId, [1n], generateStartingPositions([1n], true)],
+      { account: playerA.account }
+    );
+    await lobbies.write.createFleet(
+      [lobbyId, [6n], generateStartingPositions([6n], false)],
+      { account: playerB.account }
+    );
+
+    return lobbyId;
+  }
+
   describe("Creation & sponsorship", function () {
     it("creates a tournament and records a sponsor prize from the creator's value", async function () {
       const { asOwner, owner, now } = await loadFixture(deployTournamentFixture);
@@ -873,10 +921,11 @@ describe("Tournament", function () {
       await hre.network.provider.send("evm_mine");
       await asOwner.write.buildBracket([1n]);
 
-      // Try to reuse the old, pre-existing result for this brand-new match.
-      await asOwner.write.assignMatchGame([1n, 0n, oldGameId]);
+      // HA3-03: assignMatchGame now re-verifies the T-02 timing check itself
+      // (not just recordResult/resolveDraw), so the reuse attempt is
+      // rejected right at assignment time, before ever reaching recordResult.
       await expect(
-        asOwner.write.recordResult([1n, 0n, `0x${"33".repeat(32)}`])
+        asOwner.write.assignMatchGame([1n, 0n, oldGameId])
       ).to.be.rejectedWith("GamePredatesAssignment");
     });
   });
@@ -942,9 +991,8 @@ describe("Tournament", function () {
     });
 
     it("rejects claimForfeitWin once a game has already been assigned", async function () {
-      const { asOwner, asAlice, asBob, now } = await loadFixture(
-        deployTournamentFixture
-      );
+      const { deployed, asOwner, asAlice, asBob, alice, bob, now } =
+        await loadFixture(deployTournamentFixture);
       await asOwner.write.createTournament([
         defaultConfig(now, { maxPlayers: 2 }),
       ]);
@@ -957,7 +1005,11 @@ describe("Tournament", function () {
       await asOwner.write.start([1n]);
       await hre.network.provider.send("evm_mine");
       await asOwner.write.buildBracket([1n]);
-      await asBob.write.assignMatchGame([1n, 0n, 999n]);
+      // HA3-03: assignMatchGame now validates its gameId, so this needs a
+      // genuinely real game between the match's two players (a fake id like
+      // 999n would now revert at assignment time, not later).
+      const gameId = await createRealGameBetween(deployed, alice, bob);
+      await asBob.write.assignMatchGame([1n, 0n, gameId]);
       await increaseTime(3601);
 
       await expect(
@@ -1025,9 +1077,8 @@ describe("Tournament", function () {
     });
 
     it("rejects resolveStalledMatch once a game has already been assigned", async function () {
-      const { asOwner, asAlice, asBob, now } = await loadFixture(
-        deployTournamentFixture
-      );
+      const { deployed, asOwner, asAlice, asBob, alice, bob, now } =
+        await loadFixture(deployTournamentFixture);
       await asOwner.write.createTournament([
         defaultConfig(now, { maxPlayers: 2 }),
       ]);
@@ -1040,7 +1091,10 @@ describe("Tournament", function () {
       await asOwner.write.start([1n]);
       await hre.network.provider.send("evm_mine");
       await asOwner.write.buildBracket([1n]);
-      await asBob.write.assignMatchGame([1n, 0n, 999n]);
+      // HA3-03: assignMatchGame now validates its gameId (see the sibling
+      // claimForfeitWin test above for the same reasoning).
+      const gameId = await createRealGameBetween(deployed, alice, bob);
+      await asBob.write.assignMatchGame([1n, 0n, gameId]);
       await increaseTime(3601);
 
       await expect(

@@ -13,6 +13,55 @@ import {
   MapMode,
 } from "./types";
 import DeployModule from "../ignition/modules/DeployAndConfig";
+import {
+  setShipPosition,
+  setShipHullPointsToZero,
+  primeShipForRealDestruction,
+} from "./helpers/gameStorage";
+
+// Replaces debugDestroyShip: primes the ship (hullPoints=0,
+// reactorCriticalTimer=2, added to shipsWithZeroHP) then drives exactly one
+// real round to completion via Pass moves for every OTHER currently-active
+// ship, in the given turn order. Game.sol's own
+// _incrementReactorCriticalTimerForZeroHPShips then increments the primed
+// ship's timer to 3 and destroys it for real at that round's end — see
+// test/helpers/gameStorage.ts's primeShipForRealDestruction doc comment.
+// `selfMoverAccount`: a 0-HP ship can only legally Retreat, never Pass
+// (Game.sol:592-595) — so if the ship being destroyed is its owner's ONLY
+// ship, that owner can never act once it's primed, and — since the turn
+// only ever switches inside a moveShip call — the game deadlocks (the
+// other player can't move either, because it's still not their turn).
+// Passing the owner's account here Pass-moves the target ship ONCE, WHILE
+// IT'S STILL HEALTHY, before priming — handing the turn off normally, the
+// same way a real ship that takes lethal damage mid-round (after already
+// having acted that round) would.
+async function destroyShipViaRound(
+  game: any,
+  gameId: bigint,
+  shipId: bigint,
+  otherMovers: { shipId: bigint; account: any }[],
+  selfMoverAccount?: any,
+) {
+  if (selfMoverAccount) {
+    const preGameData = (await game.read.getGame([
+      gameId,
+    ])) as unknown as GameDataView;
+    const selfPos = findShipPosition(preGameData, shipId);
+    await game.write.moveShip(
+      [gameId, shipId, selfPos.row, selfPos.col, ActionType.Pass, 0n],
+      { account: selfMoverAccount },
+    );
+  }
+  await primeShipForRealDestruction(game.address, gameId, shipId);
+  const gameData = (await game.read.getGame([gameId])) as unknown as GameDataView;
+  for (const mover of otherMovers) {
+    const pos = findShipPosition(gameData, mover.shipId);
+    await game.write.moveShip(
+      [gameId, mover.shipId, pos.row, pos.col, ActionType.Pass, 0n],
+      { account: mover.account },
+    );
+  }
+}
 
 // Helper function to find a ship's position from GameDataView
 function findShipPosition(gameData: GameDataView, shipId: bigint) {
@@ -2221,9 +2270,29 @@ describe("Game", function () {
       ]);
 
       // Destroy creator's ship
-      await (game.write as any).debugDestroyShip([1n, 1], {
-        account: owner.account,
-      });
+      await destroyShipViaRound(game, 1n, 1n, [
+        { shipId: 2n, account: creator.account },
+        { shipId: 6n, account: joiner.account },
+        { shipId: 7n, account: joiner.account },
+      ]);
+
+      // Round 2 starts with joiner (alternating first player) — hand the
+      // turn back to creator before checking they can't move ship 1.
+      const round2GameData = (await game.read.getGame([
+        1n,
+      ])) as unknown as GameDataView;
+      const joinerPos6Round2 = findShipPosition(round2GameData, 6n);
+      await game.write.moveShip(
+        [
+          1n,
+          6n,
+          joinerPos6Round2.row,
+          joinerPos6Round2.col,
+          ActionType.Pass,
+          0n,
+        ],
+        { account: joiner.account },
+      );
 
       // Try to move the destroyed ship
       await expect(
@@ -2299,10 +2368,17 @@ describe("Game", function () {
         "0x0000000000000000000000000000000000000000",
       ); // No winner yet
 
-      // Destroy creator's only ship (this should end the game)
-      await (game.write as any).debugDestroyShip([gameId, 1], {
-        account: owner.account,
-      });
+      // Destroy creator's only ship (this should end the game). Creator has
+      // no other ship, so ship 1 must Pass once while still healthy (see
+      // destroyShipViaRound's selfMoverAccount doc comment) before being
+      // primed; then joiner's ship 6 completes the round.
+      await destroyShipViaRound(
+        game,
+        gameId,
+        1n,
+        [{ shipId: 6n, account: joiner.account }],
+        creator.account,
+      );
 
       // Check that the game ended and joiner won
       const finalGame = await game.read.getGame([gameId]);
@@ -2378,19 +2454,20 @@ describe("Game", function () {
         generateStartingPositions([6n, 7n], false),
       ]);
 
-      // Destroy one of creator's ships
-      await (game.write as any).debugDestroyShip([1n, 1], {
-        account: owner.account,
-      });
-
-      // Move the remaining creator ship
-      await game.write.moveShip([1n, 2n, 2, 1, ActionType.Pass, 0n], {
-        account: creator.account,
-      });
-
-      // Move both joiner ships
-      await moveShipWithinMovement(game, 1n, 6n, joiner.account);
-      await moveShipWithinMovement(game, 1n, 7n, joiner.account);
+      // Destroy one of creator's ships. Unlike the original instant debug
+      // call (which destroyed ship 1 before round 1's moves even started),
+      // real destruction only happens once a round completes (reactor
+      // timer 2->3) — so this round (creator's ship 2, then joiner's ships
+      // 6 and 7) both destroys ship 1 AND stands in for the original
+      // test's "round 1" moves in one step. Round 2 (below) is then
+      // identical to the original test's round 2: 3 fresh ships (2, 6, 7),
+      // no destroyed-ship offsetting needed anymore since ship 1 is
+      // already fully gone by the time round 2 starts.
+      await destroyShipViaRound(game, 1n, 1n, [
+        { shipId: 2n, account: creator.account },
+        { shipId: 6n, account: joiner.account },
+        { shipId: 7n, account: joiner.account },
+      ]);
 
       // Round 2 starts with joiner (alternating first player)
       const gameData = (await game.read.getGame([1n])) as any;
@@ -2479,12 +2556,18 @@ describe("Game", function () {
         { account: creator.account },
       );
 
-      await (game.write as any).debugDestroyShip([1n, 8], {
-        account: owner.account,
-      });
-      await (game.write as any).debugDestroyShip([1n, 9], {
-        account: owner.account,
-      });
+      // The real reactor-timer mechanism can only destroy a ship as part of
+      // COMPLETING a round (it's driven by round-end bookkeeping), so it
+      // can't reproduce "destroy two ships instantly mid-round without
+      // ending the round" the way the old debug call could. This test's
+      // real point — round completion must still wait on a genuinely
+      // active ship (7) even though two OTHER ships (8, 9) don't need to
+      // move — is exactly as well tested by zeroing 8 and 9's HP instead:
+      // a 0-HP ship is counted via shipsWithZeroHP (not required to move)
+      // without being destroyed, exercising the identical round-completion
+      // accounting this test is actually about.
+      await setShipHullPointsToZero(game.address, 1n, 8n);
+      await setShipHullPointsToZero(game.address, 1n, 9n);
 
       const stateAfterDestroy = (await game.read.getGame([1n])) as any;
       expect(stateAfterDestroy.turnState.currentTurn.toLowerCase()).to.equal(
@@ -2570,10 +2653,16 @@ describe("Game", function () {
       );
       expect(shipAt00?.shipId).to.equal(1n);
 
-      // Destroy the ship
-      await (game.write as any).debugDestroyShip([1n, 1], {
-        account: owner.account,
-      });
+      // Destroy the ship (creator has no other ship — see
+      // destroyShipViaRound's selfMoverAccount doc comment; joiner's ship 6
+      // then completes the round, destroying ship 1 via reactor timer).
+      await destroyShipViaRound(
+        game,
+        1n,
+        1n,
+        [{ shipId: 6n, account: joiner.account }],
+        creator.account,
+      );
 
       // Verify ship is removed from grid
       allShipPositions = await game.read.getAllShipPositions([1n]);
@@ -2649,13 +2738,31 @@ describe("Game", function () {
       // For testing purposes, we'll test the 0 hull points behavior by creating a simple scenario
       // where we can verify that the contract logic treats 0 hull points the same as destroyed ships
 
-      // First, let's verify that the contract correctly handles destroyed ships
-      // We'll use the existing debug function to destroy a ship
-      await (game.write as any).debugDestroyShip([1n, 1], {
-        account: owner.account,
-      });
+      // First, let's verify that the contract correctly handles destroyed
+      // ships. Unlike the original instant debug call, real destruction
+      // only happens once a round completes — so this (creator's ship 2,
+      // then joiner's ships 6 and 7) both destroys ship 1 AND stands in for
+      // the original test's "round 1" moves, landing us in round 2
+      // already (matching the "should exclude destroyed ships from round
+      // completion" test's same restructuring above).
+      await destroyShipViaRound(game, 1n, 1n, [
+        { shipId: 2n, account: creator.account },
+        { shipId: 6n, account: joiner.account },
+        { shipId: 7n, account: joiner.account },
+      ]);
 
-      // Try to move the destroyed ship (should fail)
+      // Round 2 starts with joiner (alternating)
+      let gameData = (await game.read.getGame([1n])) as any;
+      expect(gameData.turnState.currentTurn.toLowerCase()).to.equal(
+        joiner.account.address.toLowerCase(),
+      );
+      await moveShipWithinMovement(game, 1n, 6n, joiner.account);
+      gameData = (await game.read.getGame([1n])) as any;
+      expect(gameData.turnState.currentTurn.toLowerCase()).to.equal(
+        creator.account.address.toLowerCase(),
+      );
+
+      // Try to move the destroyed ship (should fail) — it's creator's turn.
       await expect(
         game.write.moveShip([1n, 1n, 0, 2, ActionType.Pass, 0n], {
           account: creator.account,
@@ -2680,33 +2787,8 @@ describe("Game", function () {
       expect(destroyedShip1).to.not.equal(undefined);
       expect(destroyedShip1.status).to.equal(1); // 1 = destroyed
 
-      // Verify round completion works correctly with the destroyed ship
-      // Move the remaining ships to complete the round
-      await game.write.moveShip([1n, 2n, 2, 2, ActionType.Pass, 0n], {
-        account: creator.account,
-      });
-      await moveShipWithinMovement(game, 1n, 6n, joiner.account);
-      await moveShipWithinMovement(
-        game,
-        1n,
-        7n,
-        joiner.account,
-        0,
-        ActionType.Pass,
-        true,
-      );
-
-      // Round 2 starts with joiner (alternating)
-      const gameData = (await game.read.getGame([1n])) as any;
-      expect(gameData.turnState.currentTurn.toLowerCase()).to.equal(
-        joiner.account.address.toLowerCase(),
-      );
-      await moveShipWithinMovement(game, 1n, 6n, joiner.account);
-      expect(
-        (
-          (await game.read.getGame([1n])) as any
-        ).turnState.currentTurn.toLowerCase(),
-      ).to.equal(creator.account.address.toLowerCase());
+      // Creator's round-2 move (the ShipDestroyed revert attempt above
+      // didn't consume creator's turn).
       await game.write.moveShip([1n, 2n, 2, 3, ActionType.Pass, 0n], {
         account: creator.account,
       });
@@ -2757,29 +2839,80 @@ describe("Game", function () {
       ]);
       await joinerLobbies.write.joinLobby([1n]);
 
-      // Create fleets to start the game
+      // Create fleets with an extra ship each side (unlike the other
+      // single-ship-fleet destroy tests): destroying creator's ONLY ship
+      // would end the game immediately (see "should end game and record
+      // result..."), leaving no way to submit any further moveShip call at
+      // all — this test specifically needs the game to still be live
+      // afterward, to attempt a second destroy.
       await creatorLobbies.write.createFleet([
         1n,
-        [1n],
-        generateStartingPositions([1n], true),
+        [1n, 2n],
+        generateStartingPositions([1n, 2n], true),
       ]);
       await joinerLobbies.write.createFleet([
         1n,
-        [6n],
-        generateStartingPositions([6n], false),
+        [6n, 7n],
+        generateStartingPositions([6n, 7n], false),
       ]);
 
-      // Destroy the ship once
-      await (game.write as any).debugDestroyShip([1n, 1], {
-        account: owner.account,
-      });
+      // Destroy ship 1 once (creator's other ship, 2, has no trouble
+      // moving, so no selfMoverAccount handoff is needed here).
+      await destroyShipViaRound(game, 1n, 1n, [
+        { shipId: 2n, account: creator.account },
+        { shipId: 6n, account: joiner.account },
+        { shipId: 7n, account: joiner.account },
+      ]);
+      const shipAfterFirstDestroy = tupleToShip(
+        (await ships.read.ships([1n])) as ShipTuple,
+      );
+      expect(shipAfterFirstDestroy.shipData.timestampDestroyed).to.not.equal(
+        0,
+      );
 
-      // Try to destroy the same ship again
-      await expect(
-        (game.write as any).debugDestroyShip([1n, 1], {
-          account: owner.account,
-        }),
-      ).to.be.rejectedWith("ShipDestroyed");
+      // Real gameplay has no path left to re-target an already-destroyed
+      // ship (moveShip itself already rejects it — see "should prevent
+      // destroyed ships from moving" — and every combat resolver requires
+      // a live, status==0 target), so `_removeShipFromGame`'s own
+      // `ShipDestroyed` guard (the thing this test originally exercised
+      // via the debug backdoor) is no longer independently reachable
+      // without that backdoor. What's still verifiable: re-priming the
+      // same, already-gone ship and completing another round doesn't
+      // silently re-process it — `ships.isShipDestroyed` gates the
+      // reactor-timer removal path (see Game.sol's
+      // _incrementReactorCriticalTimerForZeroHPShips), so
+      // timestampDestroyed must stay exactly what it was set to the first
+      // time, not get overwritten by a second _removeShipFromGame call.
+      // Round 2 starts with joiner (alternating) — drive their ships (6,
+      // then 7) to complete it; ship 1 stays inertly re-primed throughout.
+      await primeShipForRealDestruction(game.address, 1n, 1n);
+      let gameDataRound2 = (await game.read.getGame([
+        1n,
+      ])) as unknown as GameDataView;
+      let pos = findShipPosition(gameDataRound2, 6n);
+      await game.write.moveShip(
+        [1n, 6n, pos.row, pos.col, ActionType.Pass, 0n],
+        { account: joiner.account },
+      );
+      // Ship 2 is creator's only remaining active ship (ship 1 is gone for
+      // real; its re-primed shipsWithZeroHP entry is inert dead weight —
+      // see above), so round 2 completes as soon as it moves, without
+      // needing ship 7 to act.
+      gameDataRound2 = (await game.read.getGame([
+        1n,
+      ])) as unknown as GameDataView;
+      pos = findShipPosition(gameDataRound2, 2n);
+      await game.write.moveShip(
+        [1n, 2n, pos.row, pos.col, ActionType.Pass, 0n],
+        { account: creator.account },
+      );
+
+      const shipAfterSecondAttempt = tupleToShip(
+        (await ships.read.ships([1n])) as ShipTuple,
+      );
+      expect(shipAfterSecondAttempt.shipData.timestampDestroyed).to.equal(
+        shipAfterFirstDestroy.shipData.timestampDestroyed,
+      );
     });
 
     it("should keep turn with player who has more ships", async function () {
@@ -2975,10 +3108,14 @@ describe("Game", function () {
         account: creator.account,
       });
 
-      // Destroy creator's last unmoved ship (ship 3)
-      await (game.write as any).debugDestroyShip([1n, 3n], {
-        account: owner.account,
-      });
+      // Destroy creator's last unmoved ship (ship 3) — mid-round, after 3
+      // real moves already happened, so (as in the earlier "should not end
+      // round..." test) the real reactor-timer mechanism can't reproduce
+      // this instantly. Zeroing ship 3's HP instead tests the identical
+      // "creator has no movable ships left, turn stays with joiner"
+      // invariant this test is actually about (see setShipHullPointsToZero
+      // above for the same substitution reasoning).
+      await setShipHullPointsToZero(game.address, 1n, 3n);
 
       // Round 1: Joiner moves second ship
       await moveShipWithinMovement(
@@ -3375,12 +3512,8 @@ describe("Game", function () {
       // Use debug moves to position ships exactly where we need them
       // Position creator ship at (10, 5) and joiner ship at (10, 7)
       // This gives us a Manhattan distance of 2, which should be within range
-      await game.write.debugSetShipPosition([1n, 1n, 10, 5], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 6n, 10, 7], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 10, 5);
+      await setShipPosition(game.address, 1n, 6n, 10, 7);
 
       // Place wall tile between the ships to block line of sight
       // Place wall at column 6 (between ships at 5 and 7)
@@ -3541,12 +3674,8 @@ describe("Game", function () {
       // Move ships to positions where they can see each other but with a wall between them
       // Creator at (5, 2), Joiner at (5, 14) - same row, different columns
       // Use debugMove for this
-      await (game.write as any).debugSetShipPosition([1n, 1n, 5, 2], {
-        account: owner.account,
-      });
-      await (game.write as any).debugSetShipPosition([1n, 6n, 5, 14], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 5, 2);
+      await setShipPosition(game.address, 1n, 6n, 5, 14);
 
       // Create a wall between the ships to block line of sight
       // Wall at row 5, columns 8-10 (blocking the direct path)
@@ -3661,9 +3790,7 @@ describe("Game", function () {
       expect(initialPositions.length).to.equal(4);
 
       // Use debug function to set ship 1's hull points to 0
-      await (game.write as any).debugSetHullPointsToZero([1n, 1], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, 1n, 1);
 
       // Verify ship 1 has 0 hull points
       expect((await game.read.getShipAttributes([1n, 1])).hullPoints).to.equal(
@@ -3785,29 +3912,15 @@ describe("Game", function () {
         generateStartingPositions([6n, 7n, 8n], false),
       ]);
 
-      await (game.write as any).debugSetHullPointsToZero([1n, 1n], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, 1n, 1n);
 
-      await game.write.debugSetShipPosition([1n, 1n, 0, 0], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 2n, 5, 5], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 3n, 5, 7], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 0, 0);
+      await setShipPosition(game.address, 1n, 2n, 5, 5);
+      await setShipPosition(game.address, 1n, 3n, 5, 7);
       // Adjacent line so opening shot and finisher are range 1 (no LOS map dependency)
-      await game.write.debugSetShipPosition([1n, 6n, 5, 6], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 7n, 8, 13], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 8n, 9, 14], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 6n, 5, 6);
+      await setShipPosition(game.address, 1n, 7n, 8, 13);
+      await setShipPosition(game.address, 1n, 8n, 9, 14);
 
       let gameData = (await game.read.getGame([1n])) as GameDataView;
       expect(gameData.turnState.currentRound).to.equal(1n);
@@ -4064,15 +4177,9 @@ describe("Game", function () {
         generateStartingPositions([6n], false),
       ]);
 
-      await game.write.debugSetShipPosition([1n, 1n, 5, 5], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 6n, 5, 6], {
-        account: owner.account,
-      });
-      await (game.write as any).debugSetHullPointsToZero([1n, 6n], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 5, 5);
+      await setShipPosition(game.address, 1n, 6n, 5, 6);
+      await setShipHullPointsToZero(game.address, 1n, 6n);
 
       expect(
         (await game.read.getShipAttributes([1n, 1n])).reactorCriticalTimer,
@@ -4157,15 +4264,9 @@ describe("Game", function () {
         generateStartingPositions([6n], false),
       ]);
 
-      await game.write.debugSetShipPosition([1n, 1n, 5, 5], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 6n, 5, 6], {
-        account: owner.account,
-      });
-      await (game.write as any).debugSetHullPointsToZero([1n, 6n], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 5, 5);
+      await setShipPosition(game.address, 1n, 6n, 5, 6);
+      await setShipHullPointsToZero(game.address, 1n, 6n);
 
       await expect(
         game.write.moveShip(
@@ -4230,15 +4331,9 @@ describe("Game", function () {
         generateStartingPositions([6n], false),
       ]);
 
-      await game.write.debugSetShipPosition([1n, 1n, 5, 5], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 2n, 5, 6], {
-        account: owner.account,
-      });
-      await (game.write as any).debugSetHullPointsToZero([1n, 2n], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 5, 5);
+      await setShipPosition(game.address, 1n, 2n, 5, 6);
+      await setShipHullPointsToZero(game.address, 1n, 2n);
 
       // Ship 2 is friendly (same side as ship 1) — Ram can only hit the
       // opposing side, even though ship 2 is at 0 HP.
@@ -4305,9 +4400,7 @@ describe("Game", function () {
         generateStartingPositions([6n], false),
       ]);
 
-      await game.write.debugSetShipPosition([1n, 1n, 5, 5], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 5, 5);
 
       // 9999n was never minted — Game.sol/SpecialEffectsLib must reject this
       // before ever calling out to RamResolver (defense in depth: Game.sol
@@ -4374,12 +4467,8 @@ describe("Game", function () {
         generateStartingPositions([6n], false),
       ]);
 
-      await game.write.debugSetShipPosition([1n, 1n, 5, 5], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 6n, 5, 6], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 5, 5);
+      await setShipPosition(game.address, 1n, 6n, 5, 6);
 
       await expect(
         game.write.moveShip([1n, 1n, 5, 6, ActionType.Pass, 0n], {
@@ -4472,9 +4561,7 @@ describe("Game", function () {
       }
 
       // Now use debug to make joiner's ship (ship 6) HP zero
-      await (game.write as any).debugSetHullPointsToZero([1n, 6n], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, 1n, 6n);
 
       // Verify ship 6 has 0 HP and 0 reactor critical timer
       const ship6Attrs = await game.read.getShipAttributes([1n, 6n]);
@@ -4482,12 +4569,8 @@ describe("Game", function () {
       expect(ship6Attrs.reactorCriticalTimer).to.equal(0);
 
       // Use debug function to place ships close together for shooting
-      await (game.write as any).debugSetShipPosition([1n, 1n, 4, 0], {
-        account: owner.account,
-      });
-      await (game.write as any).debugSetShipPosition([1n, 6n, 4, 2], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 4, 0);
+      await setShipPosition(game.address, 1n, 6n, 4, 2);
 
       // Have creator's ship shoot joiner's ship (which has 0 HP)
       gameData = (await game.read.getGame([1n])) as unknown as GameDataView;
@@ -4583,9 +4666,7 @@ describe("Game", function () {
       );
 
       // Now set creator's ship 1 HP to 0 (after round has ended)
-      await (game.write as any).debugSetHullPointsToZero([1n, 1], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, 1n, 1);
 
       const ship1Attrs = await game.read.getShipAttributes([1n, 1]);
       expect(ship1Attrs.hullPoints).to.equal(0);
@@ -4674,9 +4755,7 @@ describe("Game", function () {
       ]);
 
       // Use debug to set player 1's first ship's HP to zero
-      await (game.write as any).debugSetHullPointsToZero([1n, 1], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, 1n, 1);
 
       // Have all players use no-op moves until ship 1's reactor critical timer is 3
       // Odd game rounds (1, 3): creator first. Even (2): joiner first.
@@ -4963,9 +5042,7 @@ describe("Game", function () {
       let gameData = (await game.read.getGame([1n])) as unknown as GameDataView;
       const creatorPos1 = findShipPosition(gameData, 1n);
 
-      await (game.write as any).debugSetHullPointsToZero([1n, 1], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, 1n, 1);
       const ship1Attrs = await game.read.getShipAttributes([1n, 1]);
       expect(ship1Attrs.hullPoints).to.equal(0);
 
@@ -5108,9 +5185,7 @@ describe("Game", function () {
       ]);
 
       // Set ship 2's HP to 0 using debug function
-      await (game.write as any).debugSetHullPointsToZero([1n, 2n], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, 1n, 2n);
 
       // Verify ship 2 has 0 HP
       const ship2AttrsBefore = await game.read.getShipAttributes([1n, 2n]);
@@ -5232,9 +5307,7 @@ describe("Game", function () {
         generateStartingPositions([6n], false),
       ]);
 
-      await (game.write as any).debugSetHullPointsToZero([1n, 2n], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, 1n, 2n);
       const { maxHullPoints } = await game.read.getShipAttributes([1n, 2n]);
 
       // Deliberately far below RepairDrones' fixed 40-HP strength (the
@@ -5374,9 +5447,7 @@ describe("Game", function () {
         generateStartingPositions([6n], false),
       ]);
 
-      await (game.write as any).debugSetHullPointsToZero([1n, 2n], {
-        account: owner.account,
-      });
+      await setShipHullPointsToZero(game.address, 1n, 2n);
       expect((await game.read.getShipAttributes([1n, 2n])).hullPoints).to.equal(
         0,
       );
@@ -5534,12 +5605,8 @@ describe("Game", function () {
 
       // Use debug function to position ships adjacent to each other for EMP test
       // Position creator's ship at (10, 15) and joiner's ship at (10, 16) - adjacent positions
-      await game.write.debugSetShipPosition([1n, 1n, 10, 15], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 6n, 10, 16], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 10, 15);
+      await setShipPosition(game.address, 1n, 6n, 10, 16);
 
       // Verify joiner's ship has 0 reactor critical timer initially
       const joinerShipAttrsBefore = await game.read.getShipAttributes([1n, 6n]);
@@ -5683,34 +5750,24 @@ describe("Game", function () {
       ]);
 
       // 5. Move the FlakArray ship to the center with the debug function
-      await game.write.debugSetShipPosition([1n, 1n, 5, 8], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 5, 8);
 
       // 6. Move the remaining ships so that 1 from each team are within 3 squares and 1 from each team are outside 3 away
       // FlakArray has range 3, so we need ships within 3 squares and outside 3 squares
       // FlakArray is at (5, 8) - center of grid
 
       // Creator's second ship (ship 2) - within range (distance 2)
-      await game.write.debugSetShipPosition([1n, 2n, 6, 6], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 2n, 6, 6);
 
       // Creator's third ship (ship 3) - outside range (distance 5)
-      await game.write.debugSetShipPosition([1n, 3n, 0, 0], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 3n, 0, 0);
 
       // Joiner's first ship (ship 6) - within range (Manhattan distance 3)
       // FlakArray is at (5, 8), ship 6 at (7, 9) gives Manhattan distance |7-5| + |9-8| = 2 + 1 = 3
-      await game.write.debugSetShipPosition([1n, 6n, 7, 9], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 6n, 7, 9);
 
       // Joiner's second ship (ship 7) - outside range (distance 6)
-      await game.write.debugSetShipPosition([1n, 7n, 10, 16], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 7n, 10, 16);
 
       // Get initial hull points of all ships
       const ship1AttrsBefore = await game.read.getShipAttributes([1n, 1]); // FlakArray ship
@@ -5883,12 +5940,8 @@ describe("Game", function () {
       ]);
 
       // Drone Swarm has range 5 — place the enemy 5 squares away (still in range).
-      await game.write.debugSetShipPosition([1n, 1n, 5, 0], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 6n, 5, 5], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 5, 0);
+      await setShipPosition(game.address, 1n, 6n, 5, 5);
 
       const targetAttrsBefore = await game.read.getShipAttributes([1n, 6n]);
 
@@ -5965,12 +6018,8 @@ describe("Game", function () {
       ]);
 
       // Manhattan distance 6 — one past Drone Swarm's range of 5.
-      await game.write.debugSetShipPosition([1n, 1n, 0, 0], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 6n, 0, 6], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 0, 0);
+      await setShipPosition(game.address, 1n, 6n, 0, 6);
 
       await expect(
         game.write.moveShip([1n, 1n, 0, 0, ActionType.Special, 6n], {
@@ -6048,12 +6097,8 @@ describe("Game", function () {
         generateStartingPositions([6n], false),
       ]);
 
-      await game.write.debugSetShipPosition([1n, 1n, 5, 0], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 2n, 5, 1], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 5, 0);
+      await setShipPosition(game.address, 1n, 2n, 5, 1);
 
       await expect(
         game.write.moveShip([1n, 1n, 5, 0, ActionType.Special, 2n], {
@@ -6133,18 +6178,13 @@ describe("Game", function () {
       ]);
 
       // Electric Storm has range 2, centered on the caster's own position.
-      await game.write.debugSetShipPosition([1n, 1n, 5, 8], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 2n, 5, 9], { // ally, distance 1 (in range)
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 6n, 6, 9], { // enemy, distance 2 (in range)
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 7n, 0, 0], { // enemy, far away (out of range)
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 5, 8);
+      // ally, distance 1 (in range)
+      await setShipPosition(game.address, 1n, 2n, 5, 9);
+      // enemy, distance 2 (in range)
+      await setShipPosition(game.address, 1n, 6n, 6, 9);
+      // enemy, far away (out of range)
+      await setShipPosition(game.address, 1n, 7n, 0, 0);
 
       const gameData = (await game.read.getGame([
         1n,
@@ -6315,12 +6355,8 @@ describe("Game", function () {
         generateStartingPositions([6n], false),
       ]);
 
-      await game.write.debugSetShipPosition([1n, 1n, 5, 0], {
-        account: owner.account,
-      });
-      await game.write.debugSetShipPosition([1n, 6n, 5, 1], {
-        account: owner.account,
-      });
+      await setShipPosition(game.address, 1n, 1n, 5, 0);
+      await setShipPosition(game.address, 1n, 6n, 5, 1);
 
       await expect(
         game.write.moveShip([1n, 1n, 5, 0, ActionType.Special, 6n], {

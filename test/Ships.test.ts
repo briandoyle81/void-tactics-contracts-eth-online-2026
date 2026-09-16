@@ -3573,6 +3573,159 @@ describe("Ships", function () {
       expect(versionData[2]).to.equal(4); // baseSpeed
     });
 
+    it("caps damageReduction at 100 when armor+shield alone sum above it (HA3-02)", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+
+      await shipAttributes.write.startNewAttributesVersion({
+        account: owner.account,
+      });
+
+      const flatGuns = Array(4).fill({ range: 5, damage: 50, movement: 0 });
+      const flatSpecials = Array(4).fill({
+        range: 0,
+        strength: 0,
+        movement: 0,
+      });
+      await shipAttributes.write.setVariantAttributes(
+        [
+          {
+            version: 2,
+            variant: 1,
+            baseHull: 100,
+            baseSpeed: 5,
+            foreAccuracy: [0, 0, 0],
+            hull: [0, 0, 0],
+            engineSpeeds: [0, 0, 0],
+            guns: flatGuns,
+            armors: [
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 70, movement: 0 }, // armor slot 3: 70%
+            ],
+            shields: [
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 60, movement: 0 }, // shield slot 3: 60% -> 130% combined
+            ],
+            specials: flatSpecials,
+          },
+        ],
+        { account: owner.account },
+      );
+
+      const testShip: Ship = {
+        name: "Test",
+        id: 1n,
+        equipment: { mainWeapon: 0, armor: 3, shields: 3, special: 0 },
+        traits: {
+          serialNumber: 1n,
+          colors: { h1: 0, s1: 0, l1: 0, h2: 0, s2: 0, l2: 0, h3: 0, s3: 0, l3: 0 },
+          variant: 1,
+          accuracy: 0,
+          hull: 0,
+          speed: 0,
+        },
+        shipData: {
+          shipsDestroyed: 0, // rank 1 -> 0% rank bonus, isolates the base-sum cap
+          costsVersion: 0,
+          cost: 0,
+          shiny: false,
+          constructed: true,
+          inFleet: false,
+          isFreeShip: false,
+          modified: 0,
+          timestampDestroyed: 0n,
+        },
+        owner: owner.account.address,
+      };
+
+      const attrs = await shipAttributes.read.calculateShipAttributes([
+        testShip,
+      ]);
+      // Without the fix, this would be 130 (70+60) — a value that makes the
+      // ship permanently unshootable via Game.sol's damage formula.
+      expect(attrs.damageReduction).to.equal(100);
+    });
+
+    it("caps damageReduction at 100 even when a sub-100 base is pushed over by the rank-multiplier bonus (HA3-02)", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+
+      await shipAttributes.write.startNewAttributesVersion({
+        account: owner.account,
+      });
+
+      const flatGuns = Array(4).fill({ range: 5, damage: 50, movement: 0 });
+      const flatSpecials = Array(4).fill({
+        range: 0,
+        strength: 0,
+        movement: 0,
+      });
+      await shipAttributes.write.setVariantAttributes(
+        [
+          {
+            version: 2,
+            variant: 1,
+            baseHull: 100,
+            baseSpeed: 5,
+            foreAccuracy: [0, 0, 0],
+            hull: [0, 0, 0],
+            engineSpeeds: [0, 0, 0],
+            guns: flatGuns,
+            armors: [
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 70, movement: 0 }, // base 70% — under 100 alone
+            ],
+            shields: [
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 0, movement: 0 },
+              { damageReduction: 0, movement: 0 },
+            ],
+            specials: flatSpecials,
+          },
+        ],
+        { account: owner.account },
+      );
+
+      const testShip: Ship = {
+        name: "Test",
+        id: 1n,
+        equipment: { mainWeapon: 0, armor: 3, shields: 0, special: 0 },
+        traits: {
+          serialNumber: 1n,
+          colors: { h1: 0, s1: 0, l1: 0, h2: 0, s2: 0, l2: 0, h3: 0, s3: 0, l3: 0 },
+          variant: 1,
+          accuracy: 0,
+          hull: 0,
+          speed: 0,
+        },
+        shipData: {
+          shipsDestroyed: 1000, // rank 6 -> 50% rank bonus: 70 + 35 = 105
+          costsVersion: 0,
+          cost: 0,
+          shiny: false,
+          constructed: true,
+          inFleet: false,
+          isFreeShip: false,
+          modified: 0,
+          timestampDestroyed: 0n,
+        },
+        owner: owner.account.address,
+      };
+
+      const attrs = await shipAttributes.read.calculateShipAttributes([
+        testShip,
+      ]);
+      // Without the fix (or with a fix placed only inside
+      // _calculateDamageReduction, before the rank bonus is added), this
+      // would be 105.
+      expect(attrs.damageReduction).to.equal(100);
+    });
+
     it("Should not allow non-owner to update all attributes", async function () {
       const { shipAttributes, user1 } = await loadFixture(deployShipsFixture);
 

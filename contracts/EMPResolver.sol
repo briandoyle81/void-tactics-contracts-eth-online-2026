@@ -80,12 +80,17 @@ contract EMPResolver is IEffectResolver {
         ) revert OutOfRange();
 
         uint8 strength = shipAttributes.getSpecialStrength(slot, variant);
+        // HA3-06: int8(uint8) silently wraps negative for strength >= 128
+        // (e.g. 150 -> -106), inverting "add to reactor timer" into
+        // "subtract from it." Clamp to int8's max instead of letting a
+        // misconfigured value flip sign.
+        int8 reactorTimerDelta = strength > 127 ? int8(127) : int8(strength);
 
         effects = new SpecialEffect[](1);
         effects[0] = SpecialEffect({
             shipId: targetShipId,
             hullDelta: 0,
-            reactorTimerDelta: int8(uint8(strength)),
+            reactorTimerDelta: reactorTimerDelta,
             newRow: NO_RELOCATE,
             newCol: 0,
             removalKind: 0

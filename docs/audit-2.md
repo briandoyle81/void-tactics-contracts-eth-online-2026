@@ -17,7 +17,7 @@ unwieldy the same way `pre-audit.md` did.
 
 ## High
 
-### H-07 — `Game.flee` Is Missing a `_requireGameExists` Check
+### ~~H-07 — `Game.flee` Is Missing a `_requireGameExists` Check~~
 
 **File:** `contracts/Game.sol`, lines 1358–1380 · **Full history:** `pre-audit.md`, search `H-07`
 
@@ -34,6 +34,150 @@ helper, already shared by 6 other call sites in this file.
 finding (~124 bytes headroom) — deferred until there's confirmed room to absorb it alongside other
 pending fixes. **Re-check current headroom before landing this** — it may have shrunk or grown
 since.
+
+**Status: Resolved 2026-09-16, as a side effect of an unrelated refactor — found during the HA3
+audit pass, not deliberately fixed.** `flee` no longer lives in `Game.sol` at all — it moved to
+`PvPMatch.sol` in the orchestrator split, and the G-04 gas fix changed it to call
+`game.getGameMetadataAndTurnState(_gameId)`, which itself calls `_requireGameExists` and reverts
+`GameNotFound()` for a nonexistent game (confirmed by direct trace of both functions). The original
+dead-code gap no longer exists; no further action needed.
+
+---
+
+### ~~HA3-01 — `Lobbies.sol` Has No Withdrawal Function for UTC Reservation Fees; Funds Permanently Locked~~
+
+**File:** `contracts/Lobbies.sol`, lines 333-344 (fee collection), 798-803 (`withdraw`, ETH-only)
+
+`createLobby`'s reserved-joiner path charges a 1 UTC reservation fee via
+`universalCredits.transferFrom(msg.sender, address(this), reservationFee)`, unconditionally, on
+every reserved lobby created. No refund exists on `rejectGame`/`timeoutJoiner`/`leaveLobby`, and
+`Lobbies.sol`'s only fund-recovery function, `withdraw()`, sweeps `address(this).balance` —
+**native ETH only**. Confirmed via a full-file grep: `universalCredits` is referenced exactly
+twice in the entire contract — the balance check and the `transferFrom` that pulls funds in.
+Nothing ever moves UTC back out. Every reserved lobby ever created permanently locks 1 UTC with
+zero recovery path, for anyone, including the owner. Identical bug class to the already-fixed
+**H-04** (`DroneYard` had the same gap; fixed by adding an `onlyOwner withdraw(address)` for UTC).
+
+**Fix:** add the same pattern `DroneYard`/`SinglePlayerMatch` already use — an
+`onlyOwner withdrawUC(address _to)` sweeping `universalCredits.balanceOf(address(this))`.
+
+**Status: Fixed 2026-09-16.** Added `withdrawUC(address _to)` to `Lobbies.sol`, matching
+`DroneYard.withdraw`'s exact shape (`onlyOwner`, sweeps `universalCredits.balanceOf(address(this))`
+via `transfer`, reverts `"UTC transfer failed"` on a falsy return, emits a new `Withdrawn(address
+indexed to, uint amount)` event — this contract didn't have one). `Lobbies.sol` has ample bytecode
+headroom (15.202/24.576 KiB deployed after this fix), so no size pressure.
+
+New test in `test/Lobbies.test.ts` (`"Game Reservation"` describe block):
+`"lets the owner withdraw locked UTC reservation fees (HA3-01)"` — creates a reserved lobby
+(locking 1 UTC exactly as the finding describes), confirms a non-owner call reverts
+`OwnableUnauthorizedAccount`, then confirms the owner can withdraw the full locked balance to an
+arbitrary recipient and the contract's UTC balance drops to zero. Verified genuine: temporarily
+neutralized the fix (zeroed out the withdrawn `amount` before restoring the real
+`balanceOf`-sourced version), confirmed the new test went red, then restored the real fix from a
+backup and reconfirmed byte-identical. Full suite re-run afterward: exit code 0, no regressions
+(`PRODUCTION` confirmed `false` beforehand).
+
+---
+
+### ~~HA3-03 — `Tournament.assignMatchGame` Lets a Match's Own Losing Player Permanently Freeze the Entire Tournament's Prize Pool~~
+
+**File:** `contracts/Tournament.sol` — `assignMatchGame` (444-457), `recordResult` (461-490),
+`resolveDraw` (501-530), `claimForfeitWin` (537-553), `resolveStalledMatch` (564-...), `_advance`
+(747-769), `finalize` (582-...), `cancel`/`claimRefund` (404-430)
+
+**Severity escalated from Medium to High after a deeper pass, explicitly assuming one of the two
+match players themselves is hostile, not just an uninvolved third party** (per direction) — this
+changes the threat model materially: a random griefer has no reason to keep paying gas forever for
+no benefit, but the *losing* player in a match has a direct, standing incentive to prevent that
+loss from ever being recorded, for as long as they're willing to keep transacting.
+
+**The mechanism, traced end to end:**
+- `recordResult` takes no `gameId` parameter — it reads `t.bracket[matchId].gameId` from storage
+  at call time.
+- `assignMatchGame` has no "already assigned" guard and no caller restriction, and stays fully
+  reassignable by anyone until `m.resolved` becomes `true`.
+- Both fallback paths — `claimForfeitWin` and `resolveStalledMatch` — require `m.gameId == 0` to
+  even be callable. **Nothing ever resets `m.gameId` back to 0** once any value has been assigned.
+
+**The attack:** the losing player calls `assignMatchGame(tournamentId, matchId, garbage)` at any
+point before `recordResult` would succeed against the real game. This makes `recordResult` revert
+(`GameNotFound`/`WinnerNotInMatch`/`GamePredatesAssignment` depending on what "garbage" resolves
+to) and simultaneously permanently blocks both escape hatches, since `m.gameId` can never return
+to `0` again. If the honest winner (or anyone) re-assigns the correct `gameId`, the loser simply
+re-clobbers it again — there's no cost asymmetry protecting the honest side, and no rate limit.
+
+**Why this is High, not Medium — traced the full blast radius, not just "one match stuck":**
+`_advance` only populates a match's parent bracket slot when that match resolves, so a
+permanently-stuck match permanently blocks every match above it, all the way to the final.
+`finalize()` (which distributes the *entire* prize pool — every registrant's entry fee plus any
+sponsor contribution) requires `t.champion != address(0)`, which is only ever set when the final
+match resolves. **`cancel()`/`claimRefund()` only work while the tournament is still in
+`Registration`** — once `Active` (which happens before any match is even played), there is no
+cancellation path and no owner override of any kind. **One hostile loser, in one single match,
+anywhere in the bracket, can permanently freeze every registrant's and any sponsor's funds, with
+zero on-chain recovery path for anyone, including the tournament owner.**
+
+**Secondary, harder-to-execute residual risk, noted but not the primary fix target:** even with
+assignment-time validation (below), a hostile loser could in principle arrange a *second*, distinct
+real game against the same opponent (started after `readyAt`) and try to swap the match's record to
+point at whichever of the two games favors them — but this requires the honest opponent's active
+cooperation in creating/joining that second game, which they'd have no reason to give. Worth being
+aware of, not worth engineering around given it needs victim participation.
+
+**Fix (two changes, both required — one alone isn't sufficient):**
+1. **Validate at assignment time**, not just at resolution time: reuse the exact checks
+   `recordResult`/`resolveDraw` already perform independently — the game's participants must match
+   `m.player1`/`m.player2` (either order) via `game.getGameMetadataAndTurnState`, and
+   `gameMetadata.startedAt > m.readyAt` (the existing T-02 anti-replay check). This makes it
+   impossible to ever assign a garbage or mismatched `gameId` in the first place.
+2. **Make assignment sticky**: once `m.gameId != 0`, reject further `assignMatchGame` calls for
+   that match (reuse the existing `GameAlreadyAssigned` error, already used for the same concept in
+   `claimForfeitWin`/`resolveStalledMatch`). Combined with (1), this closes both the DoS-via-
+   reassignment vector and the result-substitution-via-reassignment vector, since the *only* value
+   that can ever be assigned is already a genuinely valid, correctly-paired, correctly-timed game —
+   there's no legitimate case left needing a correction. This also matches the design this
+   contract's own comments already assume: `claimForfeitWin`'s doc comment says a stalled *assigned*
+   game should be resolved via `Game.endGameOnTimeout` + `recordResult`, not by reassigning to a
+   different game — "assign once" simply makes the code match the already-documented intent.
+
+Permissionless-ness itself is fine to keep (the documented "no single point of failure" rationale
+still holds, and is actually strengthened once assignment is validated+immutable — anyone stepping
+in to correctly assign a stalled match's real `gameId` is purely helpful, never harmful).
+
+**Status: Fixed 2026-09-16.** Implemented exactly the two-part fix above, in `assignMatchGame`
+itself: `if (m.gameId != 0) revert GameAlreadyAssigned();` first (sticky assignment), then
+`game.getGameMetadataAndTurnState(gameId)` (naturally reverts `GameNotFound` for a nonexistent
+game — no separate existence check needed), the same participant-matching check
+`resolveDraw` already uses (reusing `WinnerNotInMatch` for "this game isn't for these two
+players," consistent with how `recordResult` already reuses that same error for the analogous
+check), and the same `GamePredatesAssignment` T-02 timing check `recordResult`/`resolveDraw` both
+already perform independently — now enforced at assignment time instead of only at resolution
+time. `Tournament.sol` has ample bytecode headroom (16.644/24.576 KiB deployed after this fix, up
+from 16.259 KiB), no size pressure.
+
+Three existing tests needed updating, not just new ones added — this fix changes *when* certain
+reverts fire, which is a real behavioral change existing coverage had to be re-verified against,
+not just supplemented:
+- `"rejects reusing a game that predates this match becoming ready (T-02)"` — the
+  `GamePredatesAssignment` revert now fires at `assignMatchGame` itself, not at the later
+  `recordResult` call. Updated the assertion to match.
+- Two tests (`"rejects claimForfeitWin once a game has already been assigned"`,
+  `"rejects resolveStalledMatch once a game has already been assigned"`) previously used a fake
+  `999n` gameId purely to make `m.gameId != 0` true — that assignment now correctly fails
+  validation itself (as it should), so both needed a genuinely real game instead. Added a shared
+  `createRealGameBetween(deployed, playerA, playerB)` test helper (purchase+construct ships,
+  `Lobbies.createLobbyForAddresses`, both fleets — no moves needed, since `Game.startGame` sets
+  `metadata.startedAt` as soon as both fleets exist) rather than duplicating that setup a third
+  time inline.
+
+Verified genuine: temporarily removed the entire new validation block (sticky guard +
+participant/timing checks) from `assignMatchGame`, recompiled, and confirmed the T-02 test — the
+one whose assertion now depends specifically on the new fix's timing — went red, while the other
+28 tests in the file (including the two `GameAlreadyAssigned` tests, which test a *different*,
+pre-existing guard inside `claimForfeitWin`/`resolveStalledMatch` themselves) correctly stayed
+green, confirming the revert change was isolated to exactly where intended. Restored the real fix
+from a backup and reconfirmed byte-identical. Full suite re-run afterward: exit code 0, no
+regressions (`PRODUCTION` confirmed `false` beforehand).
 
 ---
 
@@ -234,6 +378,13 @@ burned ship still shows the pre-burn owner). Not independently exploitable today
 any future code trusting `ship.owner` over `ownerOf()`. Severity: Low/Informational — left as a
 separate, still-open item rather than assumed-fixed alongside HA2-03.
 
+**Re-confirmed 2026-09-16 (HA3 audit pass):** independently re-derived the same finding and traced
+every current consumer of `.owner` for authorization — `Fleets.createFleet`'s ownership check has
+no accompanying `timestampDestroyed` check, but its later `ships.setInFleet` call reverts
+`ShipDestroyed` (this HA2-03 fix); `DroneYard.modifyShip` likewise has no destroyed check on its
+own, but `ships.customizeShip` reverts `ShipDestroyed` too. Still not exploitable via any path
+found — still open, still worth fixing as defense-in-depth, severity assessment unchanged.
+
 ---
 
 ### ~~HA2-04 — `RoguelikeMatch.enterResupplyNode` Doesn't Check for an In-Flight Combat Game~~
@@ -295,6 +446,62 @@ check. If a version is deployed with only 4 gun entries (today's default) and a 
 equipment enum value 4-7 (the `future*` placeholders), the call panics with an out-of-bounds
 access. Accepted as-is (2026-07-16) — no fix planned, but genuinely not fixed, so tracked here
 rather than silently dropped.
+
+---
+
+### ~~HA3-02 — `damageReduction` Above 100% Makes a Ship Permanently Unshootable via `Shoot`/`FlakArray`/`DroneSwarm` (Checked-Arithmetic Revert, Not a Damage Floor)~~
+
+**File:** `contracts/ShipAttributes.sol:211-224` (`_calculateDamageReduction`, no cap on the summed
+`armors[x].damageReduction + shields[y].damageReduction`); consumed at `contracts/Game.sol:824-828`,
+independently re-implemented the identical way at `contracts/FlakArrayResolver.sol:104-108` and
+`contracts/DroneSwarmResolver.sol:86-89`
+
+**Verified directly, not just trusted:** `_calculateDamageReduction` sums two `uint8` values with
+no cap at 100 (only Solidity's default 255 overflow ceiling applies, e.g. 60+60=120 fits fine).
+The damage formula everywhere it's consumed is
+`uint16 reducedDamage = baseDamage - ((uint16(baseDamage) * reduction) / 100);` — for
+`baseDamage=60, reduction=120`: `(60*120)/100 = 72`, then `60 - 72` underflows a `uint16` under
+Solidity 0.8's default checked arithmetic and **reverts**, every time, for every `Shoot`,
+`FlakArray`, or `DroneSwarm` action against that ship. Any configured armor+shield pair whose
+`damageReduction` values sum above 100 turns "very resistant" into "permanently immune to three of
+the game's damage sources" (Ram/EMP/reactor-timer removal still work, so not a full soft-lock) —
+silently, via a revert, not a graceful floor. Owner-config-reachable only (not a zero-privilege
+player exploit), but this project's own I-02 finding already treats a malicious/compromised owner
+key as a live threat, and a careless (non-malicious) admin content update could trigger this by
+accident just as easily.
+
+**Fix:** clamp at all three consuming sites — `reduction > 100 ? 0 : baseDamage - (...)` — or cap
+the sum itself inside `_calculateDamageReduction`, so 100% is a real floor rather than an
+unenforced convention three separate call sites all assume holds.
+
+**Status: Fixed 2026-09-16.** Went with capping the value at its single source of truth rather
+than patching three consuming call sites — all three (`Game.sol`'s `Shoot` handler,
+`FlakArrayResolver`, `DroneSwarmResolver`) read `damageReduction` from the already-calculated,
+*stored* `Attributes` (via `game.getShipAttributes`/`targetAttributes`), never recomputing it
+themselves, so capping once where it's written covers all three automatically — confirmed this by
+re-reading all three consumers directly before implementing.
+
+**Found and fixed a second, related gap while implementing, not just the one `_calculateDamageReduction`
+originally flagged:** capping only inside `_calculateDamageReduction` would *not* have been
+sufficient — `calculateShipAttributes` (`ShipAttributes.sol`) applies a rank-multiplier bonus
+(0-50%, scaling with `shipsDestroyed`) to `damageReduction` *after* calling that helper, so even a
+value correctly capped at 100 going in could come back out above 100 (e.g. 100 + 50% rank bonus =
+150). The real fix clamps `attributes.damageReduction` to 100 as the very last step in
+`calculateShipAttributes`, after the rank bonus is added — the true final value, not an
+intermediate one.
+
+Bytecode: `ShipAttributes.sol` +26 bytes (12.801/24.576 KiB deployed) — negligible, ample headroom.
+
+Two new tests in `test/Ships.test.ts` (`"ShipAttributes Update Functions"` describe block), calling
+`calculateShipAttributes` directly with a synthetic `Ship` (no game/mint setup needed, since it's a
+plain view function taking a `Ship memory` argument): `"caps damageReduction at 100 when
+armor+shield alone sum above it"` (70% armor + 60% shield = 130 → 100) and `"caps damageReduction
+at 100 even when a sub-100 base is pushed over by the rank-multiplier bonus"` (70% base + a
+max-rank 50% bonus = 105 → 100) — the second test specifically proves the fix is at the right
+location, not just the naively-expected one. Verified genuine: temporarily neutralized the cap
+(`if (false && ...)`), confirmed both new tests went red, then restored the real fix from a backup
+and reconfirmed byte-identical. Full suite re-run afterward: exit code 0, no regressions
+(`PRODUCTION` confirmed `false` beforehand).
 
 ---
 
@@ -497,7 +704,7 @@ concern.
 
 ## Informational / Centralization
 
-### I-01 — Multiple Debug Functions Left in Production `Game` Contract
+### ~~I-01 — Multiple Debug Functions Left in Production `Game` Contract~~
 
 **File:** `contracts/Game.sol`, lines 1204-1252 · **Full history:** `pre-audit.md`, search `I-01`
 
@@ -505,6 +712,57 @@ concern.
 Blast radius is limited by `onlyOwner`, but their presence in production is a centralization signal
 and may confuse auditors/players about contract finality. Same three functions as I-02's
 "debug-named" category below.
+
+**Status: Fixed 2026-09-16.** Fully eliminated, not shrunk or narrowed — zero bytecode and zero
+on-chain capability remain for any of the three. This was explicitly the bar: an earlier draft
+plan considered keeping `debugDestroyShip` as a "narrower" exception (it's a thin wrapper around
+the already-existing `_removeShipFromGame`), but the direction was full removal, no exceptions.
+
+All three were genuinely load-bearing for the test suite (79 call sites across
+`test/Game.test.ts`, `test/SinglePlayerMatch.test.ts`, `test/RoguelikeMatch.test.ts`), so removal
+required replacing what they did, not just deleting them. New test-only infrastructure:
+`test/helpers/gameStorage.ts` writes directly to the Hardhat test blockchain's EVM storage slots
+(via `hardhat-network-helpers`' `setStorageAt`/`getStorageAt` — an official Hardhat testing
+primitive, the same class of technique as Foundry's `vm.store`) to reproduce the same test setup
+with **no contract-side code at all** — nothing here has any on-chain footprint. Every slot number
+was cross-checked against the Solidity compiler's own authoritative `storageLayout` output (added
+to `hardhat.config.ts`, dev-only) rather than trusted from hand-derivation alone — that check
+caught a real bug before any helper was written: `games` is storage slot 10, not the hand-derived
+9, because `Game is Ownable` and `Ownable`'s own `_owner` occupies slot 0, shifting every one of
+`Game.sol`'s own declared variables up by one.
+
+The three debug functions were not equally hard to replace:
+- `setShipPosition`/`setShipHullPointsToZero` are direct storage-poke replacements (the latter
+  required a faithful reimplementation of OpenZeppelin `EnumerableSet`'s exact `add`/`remove`
+  algorithm, since `_setShipHPToZero` moves a ship between two `EnumerableSet`s).
+- `debugDestroyShip` was NOT hand-replicated — its real effect (`_removeShipFromGame`) is too
+  cross-cutting (3 `EnumerableSet`s, a dynamic array push, cross-contract calls into `Fleets`/
+  `Ships`, a conditional orchestrator callback) to safely reproduce by hand without risking a
+  replica that silently diverges from reality. Instead, `primeShipForRealDestruction` sets a
+  ship's HP to 0 and its reactor-critical-timer to 2 (both packed into the same storage word, one
+  write) and adds it to `shipsWithZeroHP`; the caller then drives one real round to completion,
+  which triggers `Game.sol`'s own existing reactor-critical-timer logic to call the real
+  `_removeShipFromGame` — fully correct cross-contract cleanup through the actual production code
+  path, not a hand-rolled stand-in.
+
+Correctness was proven twice over: (1) `test/GameDebugHelpers.test.ts` exercises each new helper
+side-by-side with the still-present real debug function and asserts identical resulting state
+(4/4 passing, first attempt — the storage-layout cross-check paid off) — written and passing
+*before* any of the 79 real call sites were touched; (2) all 79 call sites were then migrated
+(mechanical for `setShipPosition`/`setShipHullPointsToZero`; each of the 12 `debugDestroyShip`
+sites individually reviewed and restructured, since "destroyed instantly" became "destroyed once
+a round completes" — several needed real judgment calls, e.g. a single-ship-fleet deadlock fix
+(a 0-HP ship can only legally Retreat, never Pass, so its owner must move it once while still
+healthy before priming), two mid-round-destruction tests swapped to `setShipHullPointsToZero`
+instead (the reactor-timer mechanism can't destroy mid-round, but the actual invariant under test
+— round-completion accounting — is equally well exercised that way), and the "prevent destroying
+an already-destroyed ship" test reframed from a revert-check to an idempotency check (verified by
+tracing `ships.isShipDestroyed`'s gating in `_incrementReactorCriticalTimerForZeroHPShips`
+directly, not just trusted). Full suite: 0 regressions both before and after the three functions
+were actually deleted from `Game.sol` (exit code 0 both times, `PRODUCTION` confirmed `false`).
+
+Bytecode: `Game.sol` shrank by exactly 522 bytes (23,807/24,576 deployed, up from 769 bytes of
+headroom pre-deletion to comfortable margin), matching the earlier gas-audit measurement exactly.
 
 ---
 
@@ -518,6 +776,128 @@ attributes/costs globally; pause minting/lobby creation; grant/revoke minting ri
 preset map to any game. No timelock, multisig, or governance gates any of it. Split into
 debug-named (I-01's three functions) vs. ordinary-admin-config categories — same underlying gap
 either way: a single compromised or malicious deployer key acts immediately and unilaterally.
+
+**Partial update 2026-09-16:** the debug-named category (I-01) is fully resolved — those three
+functions are deleted, not just narrowed. This finding's ordinary-admin-config half (global
+attribute/cost changes, pause controls, preset-map application, etc.) is untouched and still open;
+this was never in scope for the debug-function removal work.
+
+---
+
+### ~~HA3-04 — `AIShips.releaseShips` Has No Double-Release Guard (Defense-in-Depth; Not Currently Reachable)~~
+
+**File:** `contracts/AIShips.sol:107-112`
+
+`releaseShips` unconditionally pushes each id's `localId` onto `freeSlots` with no check that the
+slot isn't already free. If the same AI ship id were ever released twice, the duplicate `freeSlots`
+entry would let a later `allocateShip` pop and reassign that slot a second time while a still-live
+context believes it owns that ship — silently overwriting its owner/traits mid-match, no revert.
+
+**Traced reachability directly, not just noted as a concern:** both real callers
+(`SinglePlayerMatch.sol:519`, `RoguelikeMatch.sol:399`) call `releaseShips` only from their
+`onGameEnded` implementation, gated by `if (msg.sender != address(game)) revert NotGame();`, and
+`Game._endGame` (the only thing that can trigger `onGameEnded`) has had
+`if (game.metadata.ended) return;` as its first line since the already-fixed `L-08`
+(`pre-audit.md`) — confirmed still present. That guard is storage-persistent and checked before
+the orchestrator callback fires, so `onGameEnded` — and therefore `releaseShips` — cannot fire
+twice for the same `_gameId`, in the same transaction or across separate ones. **Not currently
+exploitable via any live code path.** Recommended anyway as defense-in-depth, matching this
+project's own "assume hostile/buggy callers" standing rule (CLAUDE.md) — a future third caller of
+`releaseShips`, or a regression in `_endGame`'s guard, would have no independent backstop here.
+
+**Fix (low priority, no urgency):** track per-slot in-use state (e.g. a `bool[] inUse` or checking
+`freeSlots` membership) and no-op or revert on a redundant release, matching `Fleets.clearFleet`'s
+existing idempotent-redundant-call pattern rather than corrupting state silently.
+
+**Status: Fixed 2026-09-16.** Added `mapping(uint => bool) private isFreeSlot`, keyed by local id
+(correctly defaults `false` for both "currently allocated" and "never yet allocated" slots — only
+set `true` while a slot genuinely sits in `freeSlots`). `allocateShip` clears it when popping a
+slot back out; `releaseShips` skips (rather than reverts the whole batch over) an already-free id,
+matching the griefing-resistant idempotent-batch pattern this repo already uses in
+`RandomManager.revealRandomnessBatch` and `Fleets.clearFleet`. Bytecode: +110 bytes
+(6.920/24.576 KiB deployed), ample headroom.
+
+New test in `test/AIShips.test.ts` (`"releaseShips double-release guard (HA3-04)"`): releases the
+same ship id twice and confirms `freeSlotCount()` doesn't grow from the redundant call, then
+confirms draining the pool afterward yields exactly one reused id followed by real growth past
+`slotCount`, never handing the same id out twice. Verified genuine: temporarily removed the guard
+(back to unconditionally pushing), confirmed the new test went red, then restored the real fix
+from a backup and reconfirmed byte-identical. Full suite re-run afterward (alongside HA3-05/HA3-06
+below, verified together in one clean run to rule out any ambiguity from earlier concurrent
+foreground/background test runs): exit code 0, no regressions (`PRODUCTION` confirmed `false`
+beforehand).
+
+---
+
+### ~~HA3-05 — `SpecialEffectsLib.applyRelocations` Has No Destination-Occupancy Check (Inert Today)~~
+
+**File:** `contracts/SpecialEffectsLib.sol:233-247`
+
+Every other grid-write path in this codebase explicitly rejects an occupied destination
+(`_placeShipOnGrid`, `Game.sol:299-305`; the move branch of `moveShip`, `Game.sol:638`) —
+`applyRelocations` unconditionally overwrites `game.grid[...]` instead. **Currently inert**: of
+every resolver in this codebase, only `RamResolver` ever returns a relocation, and its destination
+is always exactly the same-batch-removed target's own now-vacated cell (`RamResolver.sol:101-102`,
+paired with a same-batch removal), so no live third-party ship can currently occupy that cell.
+Worth a defensive occupancy check before any future resolver adds a second relocation source —
+a collision here would desync `grid` from `shipPositions` permanently with no code path to detect
+or repair it, a worse failure mode than a clean revert.
+
+**Status: Fixed 2026-09-16.** Added a new `RelocationDestinationOccupied` error and a
+`game.grid[newRow][newCol] != 0` check, positioned after the source cell is cleared (so a
+relocation landing back on its own current cell, or onto a cell a same-batch removal just cleared,
+stays valid) but before the write. `SpecialEffectsLib` is a separately-deployed library — this
+adds +49 bytes to its own small budget (5.321/24.576 KiB deployed) and has zero effect on
+`Game.sol`'s own tight budget (confirmed unchanged: 23,807 bytes deployed, same as before this
+fix).
+
+**No new dedicated test added — documented explicitly, not silently skipped.** This finding is
+provably unreachable via any current public code path (only `RamResolver` ever relocates, always
+onto its own same-batch-removed target's cell), and `SpecialEffectsLib.applyRelocations` takes a
+`GameData storage` parameter that only `Game.sol` can supply — it can't be called directly from a
+test with synthetic state the way a standalone contract can. Same reasoning already applied to
+HA2-04's second, non-independently-reachable fix earlier this session. Instead: ran the existing
+Ram-eviction-relocation test (`test/Game.test.ts`, `"evicts a 0 HP enemy, applies 1 reactor damage
+to the rammer, and relocates it onto the victim's tile"`) to confirm the new occupancy check
+doesn't cause a false-positive revert on the one legitimate, real relocation path — passes. Full
+suite re-run (alongside HA3-04/HA3-06): exit code 0, no regressions.
+
+---
+
+### ~~HA3-06 — `EMPResolver`/`ElectricStormResolver` Cast `uint8` Strength to `int8` With No Range Check~~
+
+**File:** `contracts/EMPResolver.sol:88`, `contracts/ElectricStormResolver.sol:75`
+
+`int8(uint8(strength))` silently wraps to negative for any configured `strength >= 128` (e.g. 150
+→ -106), inverting "add to reactor timer" into "subtract from it" for every ship the effect
+touches. Admin-config-only (not attacker-reachable at normal player privilege), and current
+configured values are presumably well under 128, but there's no code-level guard preventing it —
+same "malicious/careless owner" threat model already accepted for I-02 and HA3-02 above.
+
+**Status: Fixed 2026-09-16.** Clamped `strength` to `int8`'s max (127) instead of letting a
+misconfigured value flip sign, in both resolvers: `EMPResolver.sol`
+(`strength > 127 ? int8(127) : int8(strength)`) and `ElectricStormResolver.sol` (same pattern,
+computed once into a local before the `StormContext` struct literal). Both are separately-deployed
+resolver contracts — tiny bytecode additions (+21/+25 bytes respectively), no effect on `Game.sol`.
+
+New tests in `test/EffectResolverTargetStatus.test.ts` (`"Reactor-timer strength clamping
+(HA3-06)"` describe block), using the existing `MockGameView`/`MockShipAttributesSpecial`
+isolated-unit-test pattern with `strength=200` configured, asserting `effects[0].reactorTimerDelta
+=== 127` for both resolvers. **Found and fixed a real gap in shared test infrastructure while
+writing the `ElectricStormResolver` test:** `MockGameView.getAllShipPositions` was a hardcoded stub
+always returning an empty array (never wired up, since no existing test needed it) —
+`ElectricStormResolver` is the first resolver in this test file that needs it (it scans ALL ship
+positions for its AoE, unlike the single-target resolvers already covered here). Implemented it
+properly: track every shipId ever passed to `setShipPosition` per game, return their current
+positions. Confirmed this fix didn't change behavior for any of the file's 10 pre-existing tests
+(all still pass) before trusting the new tests built on top of it.
+
+Verified genuine: temporarily reverted both resolvers' clamp back to a bare `int8(uint8(...))`
+cast, confirmed both new tests went red, then restored the real fixes from backups and reconfirmed
+byte-identical. Full suite re-run (alongside HA3-04/HA3-05, one clean run covering all three): exit
+code 0, no regressions (`PRODUCTION` confirmed `false` beforehand).
+
+All findings from the third audit pass (HA3-01 through HA3-06) are now fixed.
 
 ---
 

@@ -71,6 +71,7 @@ contract Lobbies is Ownable, ReentrancyGuard {
     event GameReserved(uint indexed lobbyId, address indexed reservedJoiner);
     event GameAccepted(uint indexed lobbyId, address indexed joiner);
     event GameRejected(uint indexed lobbyId, address indexed joiner);
+    event Withdrawn(address indexed to, uint amount);
 
     error LobbyNotFound();
     error LobbyFull();
@@ -800,6 +801,17 @@ contract Lobbies is Ownable, ReentrancyGuard {
             ""
         );
         require(success, "Withdrawal failed");
+    }
+
+    /**
+     * @dev Withdraw accumulated UTC reservation fees to `_to`. HA3-01 fix:
+     * without this, every reserved-lobby's 1 UTC fee is permanently locked
+     * in this contract — the ETH-only withdraw() above never touches it.
+     */
+    function withdrawUC(address _to) external onlyOwner {
+        uint amount = universalCredits.balanceOf(address(this));
+        require(universalCredits.transfer(_to, amount), "UTC transfer failed");
+        emit Withdrawn(_to, amount);
     }
 
     // View functions

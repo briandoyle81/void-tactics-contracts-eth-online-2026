@@ -10,6 +10,10 @@ import {
   tupleToShip,
 } from "./types";
 import DeployModule from "../ignition/modules/DeployAndConfig";
+import {
+  setShipPosition,
+  setShipHullPointsToZero,
+} from "./helpers/gameStorage";
 
 const AI_SHIP_ID_OFFSET = 2n ** 40n;
 const ROGUELIKE_GAME_ID_OFFSET = 2n ** 41n;
@@ -188,9 +192,7 @@ describe("RoguelikeMatch / RoguelikeResupply / RoguelikeNodeMap", function () {
   ) {
     const aiShipId = AI_SHIP_ID_OFFSET + 1n;
 
-    await game.write.debugSetShipPosition([gameId, humanShipId, 0, 15], {
-      account: owner.account,
-    });
+    await setShipPosition(game.address, gameId, humanShipId, 0, 15);
 
     await humanGame.write.moveShip(
       [gameId, humanShipId, 0, 15, ActionType.Pass, 0n],
@@ -200,9 +202,7 @@ describe("RoguelikeMatch / RoguelikeResupply / RoguelikeNodeMap", function () {
     // AI's one real move — may shoot the adjacent human ship.
     await otherRoguelikeMatch.write.takeAITurn([gameId]);
 
-    await game.write.debugSetHullPointsToZero([gameId, aiShipId], {
-      account: owner.account,
-    });
+    await setShipHullPointsToZero(game.address, gameId, aiShipId);
     await otherRoguelikeMatch.write.takeAITurn([gameId]);
   }
 
