@@ -206,6 +206,47 @@ free ships can't be recycled (`CannotRecycleFreeShip`), the per-kill rate is tin
 *repeat* game costs real FLOW (`additionalLobbyFee`) that almost certainly exceeds the reward.
 Noted since it's a real, previously-undocumented path, even though the value is negligible.
 
+### ECON-07 — UTC Has No Automatic Supply Sink; Mitigated by an Active Owner-Managed Burn/Sell Policy
+
+**Context, 2026-09-17** — arose from a holistic design-review discussion (pros/cons/opportunities
+for profit across the whole tokenomics), not from a code-level bug hunt like ECON-01 through
+ECON-06.
+
+Every UTC mint path is either purchase-backed (`purchaseUTCWithFlow`, buy-then-recycle) or
+grind-backed (`shipBreaker` recycling, `DestroyRewardLib`'s PvP kill reward) — none of them are
+paired with an enforced removal. The only sinks that exist are owner-discretionary:
+`ShipPurchaser.withdrawUC`/`burnCollected` and `DroneYard.withdraw`/`burnCollected`, fed by real,
+ongoing volume from `purchaseWithUC` sales and `DroneYard` modification fees. Nothing forces
+either contract's owner to ever call them. Contrast with DEC, which has a genuinely automatic,
+enforced sink (`DroneStorefront.turnInCores` calls `burnFrom` directly — verified during the
+design-review pass). Left unmanaged, UTC supply has a one-directional upward bias from ordinary
+legitimate play alone, independent of the ECON-01 referral-arbitrage dynamic — which could push
+UTC's real market value below the ~50%-of-peg floor modeled in ECON-01's corrected understanding,
+since that floor only accounts for arbitrage-driven selling, not organic dilution from thousands
+of non-arbitraging players.
+
+**Resolution — an explicit operational policy, not a code change:** the project owner's plan is to
+actively manage UTC price stability by burning or selling already-collected UTC (via the four
+functions above) depending on market conditions — burn to support price when it's soft, sell
+(converting held UTC to native-token treasury revenue) when it's strong — using the pool
+(e.g. the planned Uniswap v4 lottery pool) as the execution venue. This is a legitimate,
+well-understood pattern (open-market operations / buyback-vs-issuance), and the tooling to execute
+it already exists in the deployed contracts — no new function was needed.
+
+**Practical dependencies worth keeping in view, not fixes:**
+- Direction must stay counter-cyclical (burn when soft, sell when strong) — the reverse compounds
+  the exact move being corrected, especially since the same pool is where ECON-01-style arbitrage
+  dumps also land.
+- The lever is bounded by how much UTC has actually been collected — can't sell or burn past that,
+  so a fast, sustained one-directional move that outpaces `purchaseWithUC`/`DroneYard` inflow could
+  outrun the available intervention.
+- How much a given intervention moves price depends on treasury size relative to pool depth — worth
+  knowing which regime this is operating in (shallow pool = high leverage but frequent intervention
+  needed; deep pool = the opposite) rather than discovering it live.
+- A concrete reference band (e.g. anchored to the mint-peg rate and its modeled ~50% arbitrage
+  floor from ECON-01) would make "what's needed for stability" a consistent, checkable trigger
+  rather than a purely case-by-case judgment call — suggested, not required.
+
 ---
 
 ## Reviewed, no issue found
