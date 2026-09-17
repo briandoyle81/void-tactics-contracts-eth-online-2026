@@ -26,8 +26,43 @@ describe("ShipsRouter", function () {
       ships.address,
     ]);
     await seedVariant1Attributes(shipAttributes, owner.account);
+    // Variant 2 needs costs configured too (calculateShipCost reverts with
+    // InvalidCostsVersion otherwise) so an AI ship of variant 2 -- the one
+    // this fixture registers a reward token for below, mirroring
+    // production's real variant-2-pays-DEC mapping -- can be allocated at
+    // all. Values reused from seedVariant1Attributes; only baseCost/version
+    // existing (non-zero) matters for these tests.
+    await shipAttributes.write.setCosts(
+      [
+        2,
+        {
+          version: 0,
+          baseCost: 50,
+          accuracy: [0, 10, 25],
+          hull: [0, 10, 25],
+          speed: [0, 10, 25],
+          mainWeapon: [25, 30, 40, 40],
+          armor: [0, 5, 10, 15],
+          shields: [0, 10, 20, 30],
+          special: [0, 10, 20, 15, 15, 20, 10, 0],
+        },
+      ],
+      { account: owner.account },
+    );
     const universalCredits = await hre.viem.deployContract("UniversalCredits");
     const droneEnergyCores = await hre.viem.deployContract("DroneEnergyCores");
+    const factionRewardTokenRegistry = await hre.viem.deployContract(
+      "FactionRewardTokenRegistry",
+    );
+    // Registers variant 2 -> DEC, mirroring production's real mapping (see
+    // ignition/modules/DeployAndConfig.ts's setVariant2RewardTokenCall).
+    // Variant 1 (this file's defaultTraits.variant) is deliberately left
+    // unregistered, same as production today, to also prove the "no reward
+    // token yet" path for free.
+    await factionRewardTokenRegistry.write.setRewardToken([
+      2,
+      droneEnergyCores.address,
+    ]);
     const mockLobbyCheck = await hre.viem.deployContract(
       "MockLobbiesOrchestratorCheck",
     );
@@ -37,7 +72,12 @@ describe("ShipsRouter", function () {
     const destroyRewardLib = await hre.viem.deployContract("DestroyRewardLib");
     const shipsRouter = await hre.viem.deployContract(
       "ShipsRouter",
-      [ships.address, aiShips.address, universalCredits.address, droneEnergyCores.address],
+      [
+        ships.address,
+        aiShips.address,
+        universalCredits.address,
+        factionRewardTokenRegistry.address,
+      ],
       { libraries: { DestroyRewardLib: destroyRewardLib.address } },
     );
 
@@ -102,6 +142,7 @@ describe("ShipsRouter", function () {
       otherRouter,
       universalCredits,
       droneEnergyCores,
+      factionRewardTokenRegistry,
       mockLobbyCheck,
       owner,
       gameEOA,
@@ -141,10 +182,22 @@ describe("ShipsRouter", function () {
     return await ships.read.shipCount();
   }
 
-  async function allocateAiShip(aiShips: any, to: `0x${string}`, name: string) {
+  async function allocateAiShip(
+    aiShips: any,
+    to: `0x${string}`,
+    name: string,
+    variant: number = 1,
+  ) {
     await aiShips.write.allocateShip([
       to,
-      { name, id: 0n, equipment: defaultEquipment, traits: defaultTraits, shipData, owner: zeroAddress },
+      {
+        name,
+        id: 0n,
+        equipment: defaultEquipment,
+        traits: { ...defaultTraits, variant },
+        shipData,
+        owner: zeroAddress,
+      },
     ]);
     return AI_SHIP_ID_OFFSET + (await aiShips.read.slotCount());
   }
@@ -217,7 +270,9 @@ describe("ShipsRouter", function () {
         await loadFixture(deployFixture);
 
       const humanId = await mintHumanShip(ships, human.account.address, "Human Ship");
-      const aiId = await allocateAiShip(aiShips, aiOwner.account.address, "AI Ship");
+      // Variant 2 -- this fixture registers variant 2's reward token as
+      // DEC, mirroring production's real mapping.
+      const aiId = await allocateAiShip(aiShips, aiOwner.account.address, "AI Ship", 2);
 
       const recycleReward = await ships.read.recycleReward();
       await gameRouter.write.setTimestampDestroyed([aiId, humanId]);
@@ -272,6 +327,82 @@ describe("ShipsRouter", function () {
       expect(
         await droneEnergyCores.read.balanceOf([other.account.address]),
       ).to.equal(0n);
+    });
+
+    it("mints no reward token and does not revert when the destroyed AI ship's variant has no reward token registered", async function () {
+      const { gameRouter, ships, aiShips, universalCredits, droneEnergyCores, human, aiOwner } =
+        await loadFixture(deployFixture);
+
+      const humanId = await mintHumanShip(ships, human.account.address, "Human Ship");
+      // Variant 1 -- deliberately never registered in this fixture (only
+      // variant 2 is, mirroring production), unlike variant 2's AI kill
+      // above.
+      const aiId = await allocateAiShip(aiShips, aiOwner.account.address, "Unfunded AI Ship", 1);
+
+      await gameRouter.write.setTimestampDestroyed([aiId, humanId]);
+
+      // The kill still processes fully -- no revert, ship still marked
+      // destroyed, kill still recorded -- it just pays no reward currently.
+      expect(await aiShips.read.isShipDestroyed([aiId])).to.equal(true);
+      const humanShip = await ships.read.getShip([humanId]);
+      expect(humanShip.shipData.shipsDestroyed).to.equal(1);
+
+      expect(
+        await droneEnergyCores.read.balanceOf([human.account.address]),
+      ).to.equal(0n);
+      expect(
+        await universalCredits.read.balanceOf([human.account.address]),
+      ).to.equal(0n);
+    });
+
+    it("mints a newly-registered token for a variant registered after the router's initial deploy", async function () {
+      const {
+        gameRouter,
+        ships,
+        aiShips,
+        shipAttributes,
+        factionRewardTokenRegistry,
+        shipsRouter,
+        owner,
+        human,
+        aiOwner,
+      } = await loadFixture(deployFixture);
+
+      // A brand-new AI faction (variant 3) and its own brand-new reward
+      // token, both deployed/configured well after shipsRouter/
+      // destroyRewardLib already exist -- proves a new faction's reward
+      // token can be added with zero contract redeploy.
+      await shipAttributes.write.setCosts(
+        [
+          3,
+          {
+            version: 0,
+            baseCost: 50,
+            accuracy: [0, 10, 25],
+            hull: [0, 10, 25],
+            speed: [0, 10, 25],
+            mainWeapon: [25, 30, 40, 40],
+            armor: [0, 5, 10, 15],
+            shields: [0, 10, 20, 30],
+            special: [0, 10, 20, 15, 15, 20, 10, 0],
+          },
+        ],
+        { account: owner.account },
+      );
+      const newFactionToken = await hre.viem.deployContract("DroneEnergyCores");
+      await newFactionToken.write.setMintIsActive([true]);
+      await newFactionToken.write.setAuthorizedToMint([shipsRouter.address, true]);
+      await factionRewardTokenRegistry.write.setRewardToken([3, newFactionToken.address]);
+
+      const humanId = await mintHumanShip(ships, human.account.address, "Human Ship");
+      const aiId = await allocateAiShip(aiShips, aiOwner.account.address, "Faction 3 Ship", 3);
+
+      const recycleReward = await ships.read.recycleReward();
+      await gameRouter.write.setTimestampDestroyed([aiId, humanId]);
+
+      expect(
+        await newFactionToken.read.balanceOf([human.account.address]),
+      ).to.equal(recycleReward >> 2n);
     });
   });
 

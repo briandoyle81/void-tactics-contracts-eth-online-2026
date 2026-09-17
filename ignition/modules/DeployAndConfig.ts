@@ -324,6 +324,16 @@ const DeployModule = buildModule("DeployModule", (m) => {
   // that medal contract (and the campaign's final node id) exist.
   const variantPurchaseGate = m.contract("VariantPurchaseGate");
 
+  // Generic per-AI-faction-variant reward token registry (variant -> reward
+  // token, address(0) == no reward token registered for that variant yet,
+  // in which case DestroyRewardLib pays nothing rather than reverting).
+  // DestroyRewardLib/ShipsRouter stay ignorant of which variants have a
+  // token or what it is — a future AI faction's token only needs a
+  // setRewardToken call here, not a ShipsRouter/DestroyRewardLib redeploy.
+  // Wired to pay DEC for variant 2 further below; variant 1 intentionally
+  // has no token registered yet.
+  const factionRewardTokenRegistry = m.contract("FactionRewardTokenRegistry");
+
   // Deploy AIShips: non-NFT, poolable store for single-player AI ships,
   // sitting behind ShipsRouter below instead of Ships.sol. AI ships are
   // never owned/traded by players, so this has no ERC-721/mint machinery —
@@ -349,7 +359,7 @@ const DeployModule = buildModule("DeployModule", (m) => {
   // contract's header comment.
   const shipsRouter = m.contract(
     "ShipsRouter",
-    [ships, aiShips, universalCredits, droneEnergyCores],
+    [ships, aiShips, universalCredits, factionRewardTokenRegistry],
     { libraries: { DestroyRewardLib: destroyRewardLib } },
   );
 
@@ -1576,6 +1586,15 @@ const DeployModule = buildModule("DeployModule", (m) => {
     shatteredHiveMedal,
   ]);
 
+  // Variant 2 AI kills pay DEC. Variant 1 intentionally has no reward token
+  // registered yet — DestroyRewardLib pays nothing for those kills until one
+  // is added here later, with no ShipsRouter/DestroyRewardLib redeploy.
+  const setVariant2RewardTokenCall = m.call(
+    factionRewardTokenRegistry,
+    "setRewardToken",
+    [2, droneEnergyCores],
+  );
+
   // Set PvPMatch address in Lobbies contract
   const setLobbiesPvpMatchAddressCall = m.call(lobbies, "setPvpMatchAddress", [
     pvpMatch,
@@ -2189,6 +2208,11 @@ const DeployModule = buildModule("DeployModule", (m) => {
       after: [setVariant2GateCall],
     });
 
+    m.call(factionRewardTokenRegistry, "transferOwnership", [MAP_EDITOR], {
+      id: "TransferFactionRewardTokenRegistryOwnership",
+      after: [setVariant2RewardTokenCall],
+    });
+
     m.call(shatteredHiveMedal, "transferOwnership", [MAP_EDITOR], {
       id: "TransferShatteredHiveMedalOwnership",
       after: [setShatteredHiveMedalArtCall],
@@ -2323,6 +2347,7 @@ const DeployModule = buildModule("DeployModule", (m) => {
     shipGrantWinEffect,
     singlePlayerOrchestratorRegistry,
     variantPurchaseGate,
+    factionRewardTokenRegistry,
     shatteredHiveMedal,
     shatteredHiveMedalArt,
     tutorialClaim,

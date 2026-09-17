@@ -7,7 +7,7 @@ import "./IShips.sol";
 import "./IAIShips.sol";
 import "./Ships.sol";
 import "./IUniversalCredits.sol";
-import "./IDroneEnergyCores.sol";
+import "./IFactionRewardTokenRegistry.sol";
 import "./DestroyRewardLib.sol";
 
 // Facade Game.sol/Fleets.sol/ShipAttributes.sol call instead of Ships.sol
@@ -33,7 +33,7 @@ contract ShipsRouter is IShips, Ownable {
     Ships public ships; // human ships (real ERC-721)
     IAIShips public aiShips; // pooled AI ships (no ERC-721)
     IUniversalCredits public universalCredits;
-    IDroneEnergyCores public droneEnergyCores;
+    IFactionRewardTokenRegistry public factionRewardTokenRegistry;
 
     address public gameAddress;
     address public fleetsAddress;
@@ -46,12 +46,14 @@ contract ShipsRouter is IShips, Ownable {
         address _ships,
         address _aiShips,
         address _universalCredits,
-        address _droneEnergyCores
+        address _factionRewardTokenRegistry
     ) Ownable(msg.sender) {
         ships = Ships(_ships);
         aiShips = IAIShips(_aiShips);
         universalCredits = IUniversalCredits(_universalCredits);
-        droneEnergyCores = IDroneEnergyCores(_droneEnergyCores);
+        factionRewardTokenRegistry = IFactionRewardTokenRegistry(
+            _factionRewardTokenRegistry
+        );
         AI_SHIP_ID_OFFSET = aiShips.AI_SHIP_ID_OFFSET();
     }
 
@@ -71,7 +73,11 @@ contract ShipsRouter is IShips, Ownable {
         return _id >= AI_SHIP_ID_OFFSET;
     }
 
-    function getShip(uint _id) external view returns (Ship memory) {
+    // public (not external) so setTimestampDestroyed below can call it
+    // directly as an internal dispatch instead of paying for an external
+    // CALL to itself — external callers are unaffected, IShips only
+    // requires this to be at least externally visible.
+    function getShip(uint _id) public view returns (Ship memory) {
         return _isAI(_id) ? aiShips.getShip(_id) : ships.getShip(_id);
     }
 
@@ -101,6 +107,8 @@ contract ShipsRouter is IShips, Ownable {
             revert NotAuthorized(msg.sender);
         }
 
+        uint16 destroyedVariant = getShip(_id).traits.variant;
+
         address destroyedOwner = _isAI(_id)
             ? aiShips.markDestroyed(_id)
             : ships.markDestroyed(_id);
@@ -115,8 +123,9 @@ contract ShipsRouter is IShips, Ownable {
                 destroyedOwner,
                 destroyerOwner,
                 ships.recycleReward() >> 2, // Division by 4
+                destroyedVariant,
                 universalCredits,
-                droneEnergyCores
+                factionRewardTokenRegistry
             );
         }
     }

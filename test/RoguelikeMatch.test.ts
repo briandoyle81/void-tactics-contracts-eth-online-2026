@@ -72,7 +72,11 @@ describe("RoguelikeMatch / RoguelikeResupply / RoguelikeNodeMap", function () {
   // One AI ship, Grunt archetype, at (0, 16) — the AIShips pool's first
   // ever allocation always lands there, matching test/SinglePlayerMatch
   // .test.ts's own convention.
-  async function setupBasicAIEncounter(maps: any, aiEncounters: any) {
+  async function setupBasicAIEncounter(
+    maps: any,
+    aiEncounters: any,
+    variant = 1,
+  ) {
     await maps.write.createPresetMap([[], MapMode.Both]);
     const mapId = await maps.read.mapCount();
     const defaultEquipment = {
@@ -94,7 +98,7 @@ describe("RoguelikeMatch / RoguelikeResupply / RoguelikeNodeMap", function () {
         s3: 0,
         l3: 0,
       },
-      variant: 1,
+      variant,
       accuracy: 0,
       hull: 0,
       speed: 0,
@@ -166,8 +170,9 @@ describe("RoguelikeMatch / RoguelikeResupply / RoguelikeNodeMap", function () {
     maps: any,
     aiEncounters: any,
     costCap = 2000n,
+    variant = 1,
   ) {
-    const mapId = await setupBasicAIEncounter(maps, aiEncounters);
+    const mapId = await setupBasicAIEncounter(maps, aiEncounters, variant);
     await roguelikeNodeMap.write.createCampaign();
     const campaignId = await roguelikeNodeMap.read.campaignCount();
     const rootNodeId = await createCombatNode(roguelikeNodeMap, campaignId, mapId);
@@ -249,10 +254,15 @@ describe("RoguelikeMatch / RoguelikeResupply / RoguelikeNodeMap", function () {
         { client: { wallet: human } },
       );
 
+      // Variant 2 -- production's FactionRewardTokenRegistry registers DEC
+      // for variant 2 (see DeployAndConfig.ts's setVariant2RewardTokenCall);
+      // variant 1 intentionally has no reward token registered.
       const { rootNodeId } = await setupCampaignWithRoot(
         roguelikeNodeMap,
         maps,
         aiEncounters,
+        2000n,
+        2,
       );
       await purchaseAndConstructHumanShips(ships, randomManager, human);
       await humanRoguelikeMatch.write.startRun([

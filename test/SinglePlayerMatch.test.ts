@@ -123,13 +123,17 @@ describe("SinglePlayerMatch", function () {
   // produced for ship index 0 — and returns its map id. _mintAIFleet reads
   // its fleet composition/placement entirely from AIEncounters, so every
   // single-player test needs a real, non-empty configured map.
-  async function setupBasicAIEncounter(maps: any, aiEncounters: any) {
+  async function setupBasicAIEncounter(
+    maps: any,
+    aiEncounters: any,
+    variant = 1,
+  ) {
     await maps.write.createPresetMap([[], MapMode.Both]);
     const mapId = await maps.read.mapCount();
     await aiEncounters.write.createAIShipConfig([
       "AI Ship",
       defaultEquipment,
-      defaultTraits,
+      { ...defaultTraits, variant },
       defaultArchetype,
     ]);
     const configId = await aiEncounters.read.aiShipConfigCount();
@@ -1389,7 +1393,7 @@ describe("SinglePlayerMatch", function () {
     // through it) tests DestroyRewardLib's UTC-vs-DEC branching without
     // needing to reproduce Game.sol's deterministic-but-opaque damage math
     // just to force a real one-shot kill in combat.
-    async function setUpOneAIShip(fixture: any) {
+    async function setUpOneAIShip(fixture: any, variant = 1) {
       const {
         ships,
         maps,
@@ -1401,7 +1405,7 @@ describe("SinglePlayerMatch", function () {
         human,
       } = fixture;
 
-      const mapId = await setupBasicAIEncounter(maps, aiEncounters);
+      const mapId = await setupBasicAIEncounter(maps, aiEncounters, variant);
       const nodeId = await createCampaignNode(nodeMap, mapId);
 
       await purchaseAndConstructHumanShip(ships, randomManager, humanShips, human);
@@ -1422,7 +1426,10 @@ describe("SinglePlayerMatch", function () {
       const fixture = await loadFixture(deploySinglePlayerFixture);
       const { ships, shipsRouter, universalCredits, droneEnergyCores, owner, human } =
         fixture;
-      const { humanShipId, aiShipId } = await setUpOneAIShip(fixture);
+      // Variant 2 -- production's FactionRewardTokenRegistry registers DEC
+      // for variant 2 (see DeployAndConfig.ts's setVariant2RewardTokenCall);
+      // variant 1 intentionally has no reward token registered.
+      const { humanShipId, aiShipId } = await setUpOneAIShip(fixture, 2);
 
       const [utcBefore, decBefore, recycleReward] = await Promise.all([
         universalCredits.read.balanceOf([human.account.address]),
