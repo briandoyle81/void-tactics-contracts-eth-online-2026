@@ -20,6 +20,10 @@ node_modules
 # Hardhat Ignition default folder for deployments against a local node
 ignition/deployments/chain-31337
 
+# Cached ETH/USD price for production deploys (see getEthUsdPrice in
+# DeployAndConfig.ts) -- machine/time-specific, never meant to be committed
+ignition/.eth-price-cache.json
+
 # Large build info files
 ignition/deployments/chain-545/build-info/*
 ignition/deployments/chain-84532/build-info/*

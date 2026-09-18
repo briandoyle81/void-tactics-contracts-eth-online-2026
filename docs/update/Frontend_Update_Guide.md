@@ -1,5 +1,18 @@
 # Frontend Update Guide - Contract Changes
 
+> **Superseded, 2026-09-17 — do not treat this as current.** This file predates the 2026-09-09
+> hackathon fork (last touched October 2025) and has drifted from actual contract behavior in at
+> least one confirmed way (its `purchaseUTCWithFlow` description no longer matches the real,
+> long-standing `tierShips × recycleReward` minting formula). The other dated docs in `docs/update/`
+> (`faction-2.md`, `Frontend_Updates_2026-08-26.md`, `Frontend_Updates_2026-08-27.md`, and the
+> campaign/roguelike/AI-levels guides), plus `docs/tournament-frontend.md` and
+> `docs/uniswap-lottery-selfie-check-frontend-integration.md`, all describe pre-fork feature history
+> and remain valid reference for that. **For everything that's changed since the fork (2026-09-09
+> onward), see `docs/eth-remote/Frontend_Updates_2026-09-17.md` instead** — that's the current,
+> single changelog for this hackathon session. This file is kept here for historical reference
+> only, not rewritten in place — its scope (everything since October 2025) is far larger than what
+> was actually verified in this pass.
+
 ## Overview
 
 This document outlines the breaking changes and new features in the Ships contract that require frontend updates.

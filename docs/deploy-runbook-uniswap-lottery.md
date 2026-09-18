@@ -38,13 +38,12 @@ addresses Phase 1 produces. Do not run Phase 2 against a stale/old deployment.
 - [ ] `.env` has `METAMASK_WALLET_1` (the deploy signer) funded with enough
       Base Sepolia ETH for the full deploy (dozens of contracts + many config
       calls — budget generously).
-- [ ] `.env` has `SHIP_MINTER_PRIVATE_KEY` set — a wallet that will hold
-      `Ships`' owner rights after this deploy's ownership-handover step, used
-      later in Phase 2 for the one owner-gated grant it needs. (If this is
-      meant to be the same key as `MAP_EDITOR`, confirm that now — the
-      ownership handover transfers `Ships` to the hardcoded `MAP_EDITOR`
-      constant in `ignition/modules/DeployAndConfig.ts`, not to whichever
-      wallet deployed.)
+- [ ] `.env` has `MAP_EDITOR_KEY` set — the private key for `MAP_EDITOR`
+      (`ignition/modules/DeployAndConfig.ts`'s hardcoded constant), which is
+      who this deploy's ownership-handover step actually transfers `Ships` to
+      (not whichever wallet ran the deploy). Phase 2 checks this key first for
+      both owner-gated calls it needs. `SHIP_MINTER_PRIVATE_KEY` still works
+      as a fallback name for the same key if that's what you already have set.
 - [ ] `npx hardhat test` passes (650/650 as of this writing) with `PRODUCTION
       = false`.
 
@@ -126,23 +125,28 @@ Only run this after Phase 1 is live and you've confirmed
 
 ### 2.1 Preconditions
 
-- [ ] `.env` has `SHIP_MINTER_PRIVATE_KEY` set (see 1.1) — **this is now a hard
+- [ ] `.env` has `MAP_EDITOR_KEY` set (see 1.1) — **this is now a hard
       requirement, not just nice-to-have.** As of the HA2-02 fix (2026-09-12),
       `PoolManager.initialize` is owner-gated on the hook, so this key must
       also match `hookOwnerAddress` (defaults to `MAP_EDITOR`, same as
       `Ships.owner()` after Phase 1's handover) for the script to complete
-      Phase 2 in one run. If it doesn't match either, the script prints
+      Phase 2 in one run. `SHIP_MINTER_PRIVATE_KEY` is checked as a fallback
+      if `MAP_EDITOR_KEY` isn't set. If neither matches, the script prints
       calldata for manual submission and halts at whichever step needs it —
       the ship-minting grant is safely skippable, but pool-initialize is not
       (everything after it depends on the pool existing).
-- [ ] Deploy wallet (`METAMASK_WALLET_1`) funded with enough Base Sepolia ETH
-      to cover: hook-deploy gas (~12KB contract, budget generously), the
-      LP-seed spend (~2x its ETH-equivalent value — see the script's header
-      comment), and the smoke-test swap.
+- [ ] Deploy wallet (`METAMASK_WALLET_1`) funded with enough Base Sepolia ETH.
+      **As of 2026-09-17, `SKIP_SMOKE_TEST` defaults to `true`** (see below),
+      so routine runs only need hook-deploy gas plus a cheap ~$10-equivalent
+      LP seed — a small faucet claim covers it. Only budget for the smoke
+      test's much larger LP-seed requirement (~1+ ETH — real testnet ETH is
+      scarce, faucets give ~0.01 ETH at a time) if you're deliberately
+      passing `SKIP_SMOKE_TEST=false` to prove the integration end-to-end
+      with real funding.
 - [ ] Decide (or accept the defaults) for the script's optional env vars —
       see `scripts/deployUTCLotteryPool.ts`'s own header comment for the
       full list (`REFERENCE_TIER_INDEX`, `LP_SEED_UC_AMOUNT`,
-      `HOOK_OWNER_ADDRESS`, `DRY_RUN_ONLY`).
+      `HOOK_OWNER_ADDRESS`, `DRY_RUN_ONLY`, `SKIP_SMOKE_TEST`).
 
 ### 2.2 Run it
 
@@ -169,29 +173,43 @@ a direct state read before the script declares success.
 
 ### 2.4 If something goes wrong
 
-- **`PoolAlreadyLocked` / the script reports a hook locked to the wrong
-  pool:** there is no on-chain fix for that specific hook address. Just
-  re-run the script — it mines a *fresh* salt/hook address each run (nothing
-  caches a previous mined address), so a new attempt gets a clean hook. Don't
-  try to reuse the old hook address for anything.
-- **Manual grant printed instead of sent:** `SHIP_MINTER_PRIVATE_KEY` didn't
-  match `Ships.owner()`. Submit the printed `to`/`data` from whichever wallet
-  actually holds owner rights (e.g. via Basescan's "Write Contract" using raw
-  calldata, or a separately-keyed script run).
+- **`PoolAlreadyLocked` / the script reports a hook locked to the wrong (or a
+  price-distorted) pool:** there is no on-chain fix for that specific hook
+  address, **and re-running this script alone will not give you a different
+  one.** Confirmed 2026-09-17: `hookMiner.ts`'s salt search is deterministic
+  given the same constructor args (Ships/UniversalCredits/RandomManager/
+  hookOwnerAddress), so it always reproduces the same hook address until one
+  of those inputs changes. The only way to get a genuinely fresh hook is to
+  **redeploy Phase 1 first** (a fresh `UniversalCredits` etc. — this project's
+  UTC contract isn't meant to be permanent yet, so this is the expected normal
+  cycle, not a workaround), *then* re-run this script. Don't try to reuse the
+  old hook or its pool for anything once this happens.
+- **Manual grant printed instead of sent:** neither `MAP_EDITOR_KEY` nor
+  `SHIP_MINTER_PRIVATE_KEY` matched `Ships.owner()`. Submit the printed
+  `to`/`data` from whichever wallet actually holds owner rights (e.g. via
+  Basescan's "Write Contract" using raw calldata, or a separately-keyed
+  script run) — or just set `MAP_EDITOR_KEY` in `.env` and re-run, which is
+  the automated path this is for.
 - **Script throws with a printed `initialize` calldata instead of completing:**
-  `SHIP_MINTER_PRIVATE_KEY` didn't match `hookOwnerAddress` — unlike the grant
-  above, this step can't be skipped (liquidity/smoke-test all depend on the
-  pool existing), so the script halts here on purpose. Submit the printed
-  `to`/`data` from the hook's actual owner wallet, then **re-run the whole
-  script** — it's idempotent, so it'll skip everything already done and pick
-  up at liquidity-adding.
-- **Smoke test fails to find a `SellRecorded` event:** don't assume the pool
-  is broken — check `hook.minEntryThresholdWei()` against what the script
-  computed the smoke-test sell size from; a large price move between the
-  script's rate read and the actual swap (unlikely on a fresh pool, but
-  possible) could shrink real proceeds below the threshold. Re-run with a
-  larger `LP_SEED_UC_AMOUNT` / investigate before assuming something is wrong
-  with the hook itself.
+  neither `MAP_EDITOR_KEY` nor `SHIP_MINTER_PRIVATE_KEY` matched
+  `hookOwnerAddress` — unlike the grant above, this step can't be skipped
+  (liquidity/smoke-test all depend on the pool existing), so the script halts
+  here on purpose. Set `MAP_EDITOR_KEY` in `.env` and re-run (preferred,
+  fully automated), or submit the printed `to`/`data` manually from the
+  hook's actual owner wallet and then **re-run the whole script** — it's
+  idempotent, so it'll skip everything already done and pick up at
+  liquidity-adding either way.
+- **Smoke test fails to find a `SellRecorded` event:** confirmed on-chain
+  2026-09-17 — the actual cause was the default LP seed (~$10-equivalent)
+  being far too small relative to the smoke-test sell size, so the trade's
+  own price impact ate most of its proceeds (a trade that's a large fraction
+  of a pool's reserve gets real proceeds well below the naive/linear
+  estimate). The script now sizes the default LP seed relative to the
+  smoke-test sell size specifically (see `LP_SEED_TO_SMOKE_TEST_RATIO` in
+  `deployUTCLotteryPool.ts`) so this shouldn't recur by default — if you set
+  `LP_SEED_UC_AMOUNT` explicitly, keep it comfortably above that same floor
+  (the script warns if it isn't) rather than assuming a small round-number
+  seed is fine.
 
 ### 2.5 After a successful run
 

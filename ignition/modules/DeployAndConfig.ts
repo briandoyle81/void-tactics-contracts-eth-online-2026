@@ -4,6 +4,8 @@
 import { buildModule } from "@nomicfoundation/hardhat-ignition/modules";
 import { parseEther } from "viem";
 import { execSync } from "child_process";
+import { existsSync, readFileSync, writeFileSync } from "fs";
+import path from "path";
 import starterContent from "../data/singlePlayerStarterContent.json";
 import roguelikeStarterContent from "../data/roguelikeStarterContent.json";
 
@@ -66,6 +68,60 @@ const TEST_ETH_USD_PRICE = 2490;
 const MIN_SANE_ETH_USD_PRICE = 100;
 const MAX_SANE_ETH_USD_PRICE = 50_000;
 
+// On-disk cache for the fetched ETH/USD price, so repeated deploy attempts
+// within the same day (e.g. retrying after an unrelated failure, or after a
+// transient CoinGecko error/rate-limit — see the curl failure this was added
+// for, 2026-09-17) don't re-hit the API every time. An in-memory cache
+// wouldn't help here: each `npx hardhat ...` invocation is a fresh process,
+// so the cache has to survive across processes.
+const ETH_PRICE_CACHE_PATH = path.join(__dirname, "..", ".eth-price-cache.json");
+const ETH_PRICE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+interface EthPriceCache {
+  price: number;
+  fetchedAt: number;
+}
+
+// Returns the cached price only if the cache file exists, parses, has a
+// sane shape, and isn't older than the TTL — any failure of those falls
+// through to undefined (triggering a fresh fetch) rather than throwing, so a
+// missing/corrupted cache file is never itself a deploy blocker.
+function readCachedEthUsdPrice(): number | undefined {
+  if (!existsSync(ETH_PRICE_CACHE_PATH)) return undefined;
+
+  try {
+    const cache = JSON.parse(
+      readFileSync(ETH_PRICE_CACHE_PATH, "utf-8"),
+    ) as Partial<EthPriceCache>;
+    if (
+      typeof cache.price !== "number" ||
+      !Number.isFinite(cache.price) ||
+      typeof cache.fetchedAt !== "number"
+    ) {
+      return undefined;
+    }
+    if (Date.now() - cache.fetchedAt > ETH_PRICE_CACHE_TTL_MS) {
+      return undefined;
+    }
+    return cache.price;
+  } catch {
+    return undefined;
+  }
+}
+
+// Best-effort only -- failing to write the cache (e.g. read-only fs) should
+// never fail a deploy that already has a valid, freshly-fetched price.
+function writeCachedEthUsdPrice(price: number): void {
+  try {
+    const cache: EthPriceCache = { price, fetchedAt: Date.now() };
+    writeFileSync(ETH_PRICE_CACHE_PATH, JSON.stringify(cache));
+  } catch (err) {
+    console.warn(
+      `[DeployAndConfig] Failed to write ETH/USD price cache (non-fatal): ${err}`,
+    );
+  }
+}
+
 // Fetches the live ETH/USD price for a real deploy so ship tier prices
 // track the current market instead of a hardcoded constant that goes stale
 // the next time ETH moves (see docs/UTC_Price_Prediction_10k_Players.md,
@@ -73,11 +129,22 @@ const MAX_SANE_ETH_USD_PRICE = 50_000;
 // now-removed version of this file's tier-pricing block was exactly that
 // kind of stale constant). Ignition's buildModule callback runs
 // synchronously, so this shells out to curl (blocking) rather than using
-// async/await — deploy-time is not latency-sensitive.
+// async/await — deploy-time is not latency-sensitive. Cached on disk for 24
+// hours (see readCachedEthUsdPrice/writeCachedEthUsdPrice above) so repeated
+// deploy attempts in the same day don't hit the API — or its rate limit —
+// every single time.
 //
 // Only ever called when PRODUCTION is true; tests use TEST_ETH_USD_PRICE
 // and never reach this function, so they never depend on network access.
 export function getEthUsdPrice(): number {
+  const cached = readCachedEthUsdPrice();
+  if (cached !== undefined) {
+    console.log(
+      `[DeployAndConfig] Using cached ETH/USD price: $${cached} (fetched within the last 24h)`,
+    );
+    return cached;
+  }
+
   const raw = execSync(
     "curl -sf --max-time 10 'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd'",
     { encoding: "utf-8" },
@@ -107,6 +174,7 @@ export function getEthUsdPrice(): number {
   }
 
   console.log(`[DeployAndConfig] Using live ETH/USD price: $${price}`);
+  writeCachedEthUsdPrice(price);
   return price;
 }
 
