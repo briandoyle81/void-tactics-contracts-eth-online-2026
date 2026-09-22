@@ -9,12 +9,11 @@ import "./Game.sol";
 import "./IGameOrchestrator.sol";
 import "./AIEncounters.sol";
 import "./IMaps.sol";
-import "./IShipAttributes.sol";
 import "./AIBehavior.sol";
 import "./IUniversalCredits.sol";
 import "./NodeMap.sol";
 import "./IFleets.sol";
-import "./IHealFactionAbility.sol";
+import "./AIBehaviorRegistry.sol";
 import "./IShips.sol";
 
 // Plays single-player matches as an on-chain opponent. Players enter via a
@@ -30,7 +29,9 @@ contract SinglePlayerMatch is Ownable, IGameOrchestrator {
     Game public game;
     AIEncounters public aiEncounters;
     IMaps public maps;
-    IShipAttributes public shipAttributes;
+    // Maps each faction (variant) to its own AI decision contract — see
+    // AIBehaviorRegistry/IVariantAI. Set via setAIRegistryAddress.
+    AIBehaviorRegistry public aiRegistry;
     IUniversalCredits public universalCredits;
     NodeMap public nodeMap;
     IFleets public fleets;
@@ -97,7 +98,6 @@ contract SinglePlayerMatch is Ownable, IGameOrchestrator {
         address _game,
         address _aiEncounters,
         address _maps,
-        address _shipAttributes,
         address _nodeMap,
         address _fleets
     ) Ownable(msg.sender) {
@@ -106,7 +106,6 @@ contract SinglePlayerMatch is Ownable, IGameOrchestrator {
         game = Game(_game);
         aiEncounters = AIEncounters(_aiEncounters);
         maps = IMaps(_maps);
-        shipAttributes = IShipAttributes(_shipAttributes);
         nodeMap = NodeMap(_nodeMap);
         fleets = IFleets(_fleets);
     }
@@ -134,10 +133,8 @@ contract SinglePlayerMatch is Ownable, IGameOrchestrator {
         maps = IMaps(_maps);
     }
 
-    function setShipAttributesAddress(
-        address _shipAttributes
-    ) external onlyOwner {
-        shipAttributes = IShipAttributes(_shipAttributes);
+    function setAIRegistryAddress(address _aiRegistry) external onlyOwner {
+        aiRegistry = AIBehaviorRegistry(_aiRegistry);
     }
 
     function setUniversalCreditsAddress(
@@ -313,10 +310,9 @@ contract SinglePlayerMatch is Ownable, IGameOrchestrator {
     // fires one moveShip transaction per ship. This keeps every call's gas
     // cost to "decide and move one ship" instead of scaling with fleet size.
     //
-    // Decision-making is delegated to AIBehavior, dispatched by the ship's
-    // cached archetype (see decideMove below). Only fetches Maps' scoring
-    // tile positions when this ship is actually Turtle-archetype and would
-    // use them — every other archetype never touches it.
+    // Decision-making is delegated to the ship's own faction's AI contract
+    // (looked up by variant in aiRegistry, see _decideMove below), which
+    // picks a decision tree from the ship's cached archetype.
     function takeAITurn(uint _gameId) external {
         GameDataView memory g = game.getGame(_gameId);
         if (g.metadata.ended) revert GameEnded();
@@ -434,36 +430,17 @@ contract SinglePlayerMatch is Ownable, IGameOrchestrator {
             gridHeight: game.GRID_HEIGHT()
         });
 
-        if (info.archetype == Archetype.Sniper) {
-            return AIBehavior.decideSniper(ctx);
-        } else if (info.archetype == Archetype.Support) {
-            bool hasHealFactionAbility = game.factionAbilityIsHeal(
-                info.variant
+        // Each faction has its own AI built around its own abilities (e.g.
+        // healing is an equipped special for variant 1 but a faction ability
+        // for variant 2), so the tree is chosen by variant first, then by the
+        // ship's archetype inside that faction's contract. A variant with no
+        // registered AI reverts NoAIForVariant.
+        return
+            aiRegistry.aiFor(info.variant).decide(
+                ctx,
+                info.archetype,
+                info.special
             );
-            uint8 healFactionAbilityRange;
-            if (hasHealFactionAbility) {
-                healFactionAbilityRange = IHealFactionAbility(
-                    game.factionAbilityResolvers(info.variant)
-                ).range();
-            }
-            return
-                AIBehavior.decideSupport(
-                    ctx,
-                    shipAttributes,
-                    info.special,
-                    info.variant,
-                    hasHealFactionAbility,
-                    healFactionAbilityRange
-                );
-        } else if (info.archetype == Archetype.Turtle) {
-            return AIBehavior.decideTurtle(ctx);
-        }
-        // Grunt and Aggressor share this engage-or-approach logic — see
-        // AIBehavior's header comment on why. Rammer has no AI decision
-        // path (the AI never rams; player-controlled Rammer ships are
-        // unaffected — see RamResolver), so it falls through to the same
-        // default as any future archetype not yet handled above.
-        return AIBehavior.decideEngageOrApproach(ctx);
     }
 
     function _findUnmovedShip(

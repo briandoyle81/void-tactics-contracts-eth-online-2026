@@ -68,14 +68,13 @@ contract FlakArrayResolver is IEffectResolver {
         int16 actingRow,
         int16 actingCol
     ) external view returns (SpecialEffect[] memory effects) {
-        FlakContext memory ctx = FlakContext({
-            gameId: gameId,
-            shipId: shipId,
-            actingRow: actingRow,
-            actingCol: actingCol,
-            range: shipAttributes.getSpecialRange(slot, variant),
-            strength: shipAttributes.getSpecialStrength(slot, variant)
-        });
+        FlakContext memory ctx = _buildContext(
+            gameId,
+            shipId,
+            variant,
+            actingRow,
+            actingCol
+        );
 
         ShipPosition[] memory positions = game.getAllShipPositions(gameId);
 
@@ -95,6 +94,37 @@ contract FlakArrayResolver is IEffectResolver {
             effects[idx] = _buildEffect(positions[i].shipId, ctx);
             idx++;
         }
+    }
+
+    // Range/strength are read at the acting ship's attributes version pinned
+    // when the game snapshotted its attributes at start (see
+    // ShipAttributes.getSpecialRangeAt), so publishing or rolling back a
+    // version can't change them under an in-flight game.
+    function _buildContext(
+        uint gameId,
+        uint shipId,
+        uint16 variant,
+        int16 actingRow,
+        int16 actingCol
+    ) private view returns (FlakContext memory) {
+        uint16 attrVersion = game.getShipAttributes(gameId, shipId).version;
+        return
+            FlakContext({
+                gameId: gameId,
+                shipId: shipId,
+                actingRow: actingRow,
+                actingCol: actingCol,
+                range: shipAttributes.getSpecialRangeAt(
+                    variant,
+                    attrVersion,
+                    slot
+                ),
+                strength: shipAttributes.getSpecialStrengthAt(
+                    variant,
+                    attrVersion,
+                    slot
+                )
+            });
     }
 
     function _buildEffect(

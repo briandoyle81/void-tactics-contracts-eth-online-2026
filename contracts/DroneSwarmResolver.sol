@@ -71,7 +71,12 @@ contract DroneSwarmResolver is IEffectResolver {
         // Drone Swarm can only target enemy ships.
         if (acting.isCreator == target.isCreator) revert TargetNotEnemy();
 
-        uint8 range = shipAttributes.getSpecialRange(slot, variant);
+        uint16 attrVersion = _pinnedVersion(gameId, shipId);
+        uint8 range = shipAttributes.getSpecialRangeAt(
+            variant,
+            attrVersion,
+            slot
+        );
         if (
             _manhattanDistance(
                 actingRow,
@@ -81,7 +86,11 @@ contract DroneSwarmResolver is IEffectResolver {
             ) > range
         ) revert OutOfRange();
 
-        uint8 strength = shipAttributes.getSpecialStrength(slot, variant);
+        uint8 strength = shipAttributes.getSpecialStrengthAt(
+            variant,
+            attrVersion,
+            slot
+        );
         uint8 damageReduction = game
             .getShipAttributes(gameId, targetShipId)
             .damageReduction;
@@ -98,6 +107,17 @@ contract DroneSwarmResolver is IEffectResolver {
             newCol: 0,
             removalKind: 0
         });
+    }
+
+    // The acting ship's attributes version, pinned when the game snapshotted
+    // its attributes at start (Game.calculateShipAttributes). Special numbers
+    // are read at THIS version so publishing or rolling back a version can't
+    // change them under an in-flight game (see ShipAttributes.getSpecialRangeAt).
+    function _pinnedVersion(
+        uint gameId,
+        uint shipId
+    ) private view returns (uint16) {
+        return game.getShipAttributes(gameId, shipId).version;
     }
 
     function _manhattanDistance(

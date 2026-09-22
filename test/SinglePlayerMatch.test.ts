@@ -75,6 +75,7 @@ describe("SinglePlayerMatch", function () {
       maps: deployed.maps,
       nodeMap: deployed.nodeMap,
       singlePlayerMatch: deployed.singlePlayerMatch,
+      aiBehaviorRegistry: deployed.aiBehaviorRegistry,
       aiEncounters: deployed.aiEncounters,
       universalCredits: deployed.universalCredits,
       droneEnergyCores: deployed.droneEnergyCores,
@@ -275,13 +276,15 @@ describe("SinglePlayerMatch", function () {
     // per call now.
     await singlePlayerMatchOther.write.takeAITurn([gameId]);
 
-    // The AI ship should not have moved (Case 1: enemy already adjacent) and
-    // should have fired on the human's ship on this first move.
+    // The variant-1 AI is a skirmisher: with the enemy adjacent it backs
+    // off to its gun's maximum range (Laser: 3) before firing. It is in the
+    // corner (0,16), so it slides along the wall to (2,16) — exactly range 3
+    // from the human at (0,15) — and fires from there.
     const aiPosAfter = findShipPosition(
       (await game.read.getGame([gameId])) as GameDataView,
       aiShipId,
     );
-    expect(aiPosAfter.row).to.equal(0);
+    expect(aiPosAfter.row).to.equal(2);
     expect(aiPosAfter.col).to.equal(16);
 
     const humanAttrsAfter = await game.read.getShipAttributes([
@@ -598,7 +601,11 @@ describe("SinglePlayerMatch", function () {
     it("seeds thirty starter maps scaling from an easy opener (m01) through a matched-difficulty midpoint (m15) to the hardest finale (f06)", async function () {
       const { maps, aiEncounters } = await loadFixture(deploySinglePlayerFixture);
 
-      expect(await maps.read.mapCount()).to.equal(30n);
+      // 30 campaign maps (ids 1-30) plus the 5 roguelike-only maps (ids
+      // 31-35) that give the roguelike's first three missions variant-1
+      // rosters (see docs/roguelike-progression.md). Everything below reads
+      // campaign maps by id, so the extra five don't disturb it.
+      expect(await maps.read.mapCount()).to.equal(35n);
 
       // Map 1 (m01, id 1): easiest mission — light terrain, one low-value
       // scoring tile, a small 3-ship fleet.
@@ -771,7 +778,7 @@ describe("SinglePlayerMatch", function () {
       expect(ev!.args.targetShipId).to.equal(1n);
     });
 
-    it("Sniper archetype retreats rather than staying adjacent to an enemy", async function () {
+    it("Variant 1 Sniper backs off to its maximum range and still shoots, rather than staying adjacent", async function () {
       const {
         ships,
         game,
@@ -813,7 +820,8 @@ describe("SinglePlayerMatch", function () {
       const aiShipId = AI_SHIP_ID_OFFSET + 1n;
       // Reposition both ships (away from the fixed fleet-setup corner) so
       // there's room to observe a retreat: Sniper at (5,10), enemy adjacent
-      // at (5,9).
+      // at (5,9). Laser range is 3, so the variant-1 skirmisher backs off two
+      // tiles to (5,12) — exactly maximum range from (5,9) — and fires from there.
       await setShipPosition(game.address, gameId, aiShipId, 5, 10);
       await setShipPosition(game.address, gameId, 1n, 5, 9);
       await humanGame.write.moveShip([gameId, 1n, 5, 9, ActionType.Pass, 0n], {
@@ -828,15 +836,17 @@ describe("SinglePlayerMatch", function () {
       );
       const ev = events.find((e: any) => e.args.shipId === aiShipId);
       expect(ev).to.not.be.undefined;
-      expect(ev!.args.actionType).to.equal(ActionType.Pass);
+      expect(ev!.args.actionType).to.equal(ActionType.Shoot);
+      expect(ev!.args.targetShipId).to.equal(1n);
 
       const gameData = (await game.read.getGame([gameId])) as GameDataView;
       const pos = findShipPosition(gameData, aiShipId);
-      // Moved away from the enemy (col increased), not toward/adjacent.
-      expect(pos.col).to.be.greaterThan(10);
+      // Backed off to maximum range (3 from the enemy at col 9), same row.
+      expect(pos.row).to.equal(5);
+      expect(pos.col).to.equal(12);
     });
 
-    it("Sniper archetype shoots without moving when the enemy is at range but not adjacent", async function () {
+    it("Variant 1 Sniper shoots without moving when the enemy is already at its maximum range", async function () {
       const {
         ships,
         game,
@@ -876,9 +886,11 @@ describe("SinglePlayerMatch", function () {
       );
 
       const aiShipId = AI_SHIP_ID_OFFSET + 1n;
+      // Laser range is 3: an enemy at (5,7) is exactly at maximum range from
+      // (5,10), so there is nothing to gain by moving.
       await setShipPosition(game.address, gameId, aiShipId, 5, 10);
-      await setShipPosition(game.address, gameId, 1n, 5, 8);
-      await humanGame.write.moveShip([gameId, 1n, 5, 8, ActionType.Pass, 0n], {
+      await setShipPosition(game.address, gameId, 1n, 5, 7);
+      await humanGame.write.moveShip([gameId, 1n, 5, 7, ActionType.Pass, 0n], {
         account: human.account,
       });
 
@@ -981,6 +993,142 @@ describe("SinglePlayerMatch", function () {
       expect(allyAttrs.hullPoints).to.be.greaterThan(0);
     });
 
+    it("variant 2 Support ships heal with the repair faction ability, never with an equipped special", async function () {
+      const {
+        ships,
+        game,
+        maps,
+        nodeMap,
+        aiEncounters,
+        randomManager,
+        humanShips,
+        humanGame,
+        humanSinglePlayerMatch,
+        singlePlayerMatchOther,
+        singlePlayerMatch,
+        human,
+        publicClient,
+      } = await loadFixture(deploySinglePlayerFixture);
+
+      await maps.write.createPresetMap([[], MapMode.Both]);
+      const mapId = await maps.read.mapCount();
+
+      // Variant 2's AI knows every ship has the repair faction ability and
+      // that none of its equipped specials heal. This healer equips slot 2 —
+      // variant 1's RepairDrones slot, but variant 2's DroneSwarm (an attack
+      // special) — so a slot-only "slot 2 is the healer" check would wrongly
+      // try to heal with it as a Special. Variant 2's tree must use the
+      // faction ability instead.
+      const variant2Traits = { ...defaultTraits, variant: 2 };
+      await aiEncounters.write.createAIShipConfig([
+        "Variant 2 Healer",
+        { mainWeapon: 0, armor: 0, shields: 0, special: 2 },
+        variant2Traits,
+        3, // Support
+      ]);
+      const healerConfigId = await aiEncounters.read.aiShipConfigCount();
+      await aiEncounters.write.createAIShipConfig([
+        "Variant 2 Ally",
+        defaultEquipment,
+        variant2Traits,
+        0, // Grunt
+      ]);
+      const allyConfigId = await aiEncounters.read.aiShipConfigCount();
+      await aiEncounters.write.setMapPlacements([
+        mapId,
+        [
+          { row: 0, col: 15 },
+          { row: 0, col: 16 },
+        ],
+        [healerConfigId, allyConfigId],
+      ]);
+
+      const gameId = await startMatch(
+        nodeMap,
+        ships,
+        randomManager,
+        humanShips,
+        humanSinglePlayerMatch,
+        human,
+        mapId,
+      );
+
+      const healerShipId = AI_SHIP_ID_OFFSET + 1n;
+      const allyShipId = AI_SHIP_ID_OFFSET + 2n;
+
+      await setShipHullPointsToZero(game.address, gameId, allyShipId);
+      await setShipPosition(game.address, gameId, 1n, 0, 13);
+      await humanGame.write.moveShip([gameId, 1n, 0, 13, ActionType.Pass, 0n], {
+        account: human.account,
+      });
+
+      const hash = await singlePlayerMatchOther.write.takeAITurn([gameId]);
+      const events = await getAITurnTakenEvents(
+        publicClient,
+        singlePlayerMatch.abi,
+        hash,
+      );
+      const ev = events.find((e: any) => e.args.shipId === healerShipId);
+      expect(ev).to.not.be.undefined;
+      expect(ev!.args.actionType).to.equal(ActionType.FactionAbility);
+      expect(ev!.args.targetShipId).to.equal(allyShipId);
+
+      const allyAttrs = await game.read.getShipAttributes([gameId, allyShipId]);
+      expect(allyAttrs.hullPoints).to.be.greaterThan(0);
+    });
+
+    it("reverts NoAIForVariant for an AI ship whose variant has no registered AI", async function () {
+      const {
+        ships,
+        game,
+        maps,
+        nodeMap,
+        aiEncounters,
+        aiBehaviorRegistry,
+        randomManager,
+        humanShips,
+        humanGame,
+        humanSinglePlayerMatch,
+        singlePlayerMatchOther,
+        human,
+      } = await loadFixture(deploySinglePlayerFixture);
+
+      await maps.write.createPresetMap([[], MapMode.Both]);
+      const mapId = await maps.read.mapCount();
+      await aiEncounters.write.createAIShipConfig([
+        "Grunt Ship",
+        defaultEquipment,
+        defaultTraits, // variant 1
+        0, // Grunt
+      ]);
+      const configId = await aiEncounters.read.aiShipConfigCount();
+      await aiEncounters.write.setMapPlacement([mapId, 0, 16, configId]);
+
+      const gameId = await startMatch(
+        nodeMap,
+        ships,
+        randomManager,
+        humanShips,
+        humanSinglePlayerMatch,
+        human,
+        mapId,
+      );
+
+      await setShipPosition(game.address, gameId, 1n, 0, 15);
+      await humanGame.write.moveShip([gameId, 1n, 0, 15, ActionType.Pass, 0n], {
+        account: human.account,
+      });
+
+      // Unregister variant 1's AI (fail loud, not a silent generic fallback).
+      await aiBehaviorRegistry.write.setVariantAI([
+        1,
+        "0x0000000000000000000000000000000000000000",
+      ]);
+      await expect(
+        singlePlayerMatchOther.write.takeAITurn([gameId]),
+      ).to.be.rejectedWith("NoAIForVariant");
+    });
+
     it("Turtle archetype moves toward an unclaimed scoring tile when no enemy is in range", async function () {
       const {
         ships,
@@ -1064,23 +1212,27 @@ describe("SinglePlayerMatch", function () {
         singlePlayerMatchOther,
         singlePlayerMatch,
         human,
-        owner,
         publicClient,
       } = await loadFixture(deploySinglePlayerFixture);
 
-      await maps.write.createPresetMap([[], MapMode.Both]);
+      // A lone scoring tile that an ENEMY is standing on. A Turtle heads for
+      // the tile (there is nothing else to score), and the shared "step
+      // toward" primitive doesn't check occupancy — with the tile within its
+      // movement it walks straight onto the enemy's own square, which
+      // Game.sol correctly rejects as an occupied destination. This is a real
+      // edge case the cheap stepping primitive has, not a contrived one. (The
+      // Plasma Cannon's range of 2 keeps the enemy at 3 tiles out of gun
+      // range, so no shot preempts the move.)
+      await maps.write.createPresetScoringMap([
+        [{ row: 5, col: 7, points: 5, onlyOnce: false }],
+        MapMode.Both,
+      ]);
       const mapId = await maps.read.mapCount();
-      // Close: range 2, well under this ship's movement (3) — an
-      // enemy placed exactly at movement distance but outside gun range
-      // makes the shared "step toward" primitive walk straight onto the
-      // enemy's own tile (it doesn't check occupancy), which Game.sol
-      // correctly rejects as an occupied destination. This is a real edge
-      // case the cheap stepping primitive has, not a contrived one.
       await aiEncounters.write.createAIShipConfig([
-        "Plasma Grunt",
+        "Plasma Turtle",
         { mainWeapon: 3, armor: 0, shields: 0, special: 0 },
         defaultTraits,
-        0, // Grunt
+        4, // Turtle
       ]);
       const configId = await aiEncounters.read.aiShipConfigCount();
       await aiEncounters.write.setMapPlacement([mapId, 0, 16, configId]);
@@ -1096,8 +1248,9 @@ describe("SinglePlayerMatch", function () {
       );
 
       const aiShipId = AI_SHIP_ID_OFFSET + 1n;
-      await setShipPosition(game.address, gameId, 1n, 0, 13);
-      await humanGame.write.moveShip([gameId, 1n, 0, 13, ActionType.Pass, 0n], {
+      await setShipPosition(game.address, gameId, aiShipId, 5, 10);
+      await setShipPosition(game.address, gameId, 1n, 5, 7);
+      await humanGame.write.moveShip([gameId, 1n, 5, 7, ActionType.Pass, 0n], {
         account: human.account,
       });
 
@@ -1115,8 +1268,8 @@ describe("SinglePlayerMatch", function () {
 
       const gameData = (await game.read.getGame([gameId])) as GameDataView;
       const pos = findShipPosition(gameData, aiShipId);
-      expect(pos.row).to.equal(0);
-      expect(pos.col).to.equal(16);
+      expect(pos.row).to.equal(5);
+      expect(pos.col).to.equal(10);
     });
 
     it("skips a 0-HP ship and moves the next one instead of getting stuck (regression: this used to deadlock the whole match)", async function () {

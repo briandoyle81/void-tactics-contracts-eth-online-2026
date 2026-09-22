@@ -13,6 +13,7 @@ import {
   MapMode,
 } from "./types";
 import DeployModule from "../ignition/modules/DeployAndConfig";
+import { attributeParams } from "./fixtures/attributeTables";
 import {
   setShipPosition,
   setShipHullPointsToZero,
@@ -208,6 +209,7 @@ describe("Game", function () {
       creatorFleets,
       joinerFleets,
       ships: deployed.ships,
+      shipAttributes: deployed.shipAttributes,
       game: deployed.game,
       pvpMatch: deployed.pvpMatch,
       randomManager: deployed.randomManager,
@@ -680,6 +682,112 @@ describe("Game", function () {
       expect(joinerAttrs.range).to.be.greaterThan(0);
       expect(joinerAttrs.gunDamage).to.be.greaterThan(0);
       expect(joinerAttrs.statusEffects.length).to.equal(0);
+    });
+
+    it("pins each ship's attributes version at game start, unaffected by a later publish", async function () {
+      const {
+        creatorLobbies,
+        joinerLobbies,
+        creator,
+        joiner,
+        owner,
+        ships,
+        shipAttributes,
+        game,
+        randomManager,
+      } = await loadFixture(deployGameFixture);
+
+      await ships.write.purchaseWithFlow(
+        [creator.account.address, 0n, joiner.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      await ships.write.purchaseWithFlow(
+        [joiner.account.address, 0n, creator.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      for (let i = 1; i <= 10; i++) {
+        const shipTuple = (await ships.read.ships([BigInt(i)])) as ShipTuple;
+        const ship = tupleToShip(shipTuple);
+        await randomManager.write.revealRandomness([ship.traits.serialNumber]);
+      }
+      await ships.write.constructAllMyShips({ account: creator.account });
+      await ships.write.constructAllMyShips({ account: joiner.account });
+
+      await creatorLobbies.write.createLobby([
+        1000n,
+        300n,
+        true,
+        0n, // selectedMapId - no preset map,
+        100n, // maxScore
+        zeroAddress, // reservedJoiner - no reservation
+      ]);
+      await joinerLobbies.write.joinLobby([1n]);
+      await creatorLobbies.write.createFleet([
+        1n,
+        [1n],
+        generateStartingPositions([1n], true),
+      ]);
+      await joinerLobbies.write.createFleet([
+        1n,
+        [6n],
+        generateStartingPositions([6n], false),
+      ]);
+
+      // The game snapshotted variant 1's attributes version (1) for its ship.
+      const pinned = await game.read.getShipAttributes([1n, 1n]);
+      expect(pinned.version).to.equal(1);
+
+      // Publish a much tankier variant 1 (version 2) and make it live.
+      await shipAttributes.write.setVariantAttributes(
+        [
+          attributeParams({
+            variant: 1,
+            baseHull: 200,
+            baseSpeed: 3,
+            foreAccuracy: [0, 25, 50],
+            hull: [0, 10, 20],
+            engineSpeeds: [0, 1, 2],
+            guns: [
+              { range: 3, damage: 50, movement: 0 },
+              { range: 6, damage: 40, movement: 0 },
+              { range: 4, damage: 60, movement: -1 },
+              { range: 2, damage: 80, movement: 0 },
+            ],
+            armors: [
+              { damageReduction: 0, movement: 1 },
+              { damageReduction: 15, movement: 0 },
+              { damageReduction: 30, movement: -1 },
+              { damageReduction: 45, movement: -2 },
+            ],
+            shields: [
+              { damageReduction: 0, movement: 1 },
+              { damageReduction: 15, movement: 1 },
+              { damageReduction: 30, movement: 0 },
+              { damageReduction: 45, movement: -1 },
+            ],
+            specials: [{ range: 0, strength: 0, movement: 0 }],
+          }),
+        ],
+        { account: owner.account },
+      );
+      expect(
+        await shipAttributes.read.getCurrentAttributesVersion([1]),
+      ).to.equal(2);
+
+      // A fresh calculation now reflects v2...
+      const live = await shipAttributes.read.calculateShipAttributesById([1n]);
+      expect(live.version).to.equal(2);
+      expect(live.hullPoints).to.be.greaterThan(pinned.hullPoints);
+
+      // ...but the in-flight game keeps its start-of-game snapshot,
+      const after = await game.read.getShipAttributes([1n, 1n]);
+      expect(after.version).to.equal(1);
+      expect(after.hullPoints).to.equal(pinned.hullPoints);
+
+      // and can't be re-snapshotted to pull the new version in.
+      await expect(
+        game.write.calculateShipAttributes([1n, 1n]),
+      ).to.be.rejectedWith("InvalidMove");
     });
 
     it("should revert when trying to get attributes for non-existent game", async function () {
@@ -2480,9 +2588,10 @@ describe("Game", function () {
           (await game.read.getGame([1n])) as any
         ).turnState.currentTurn.toLowerCase(),
       ).to.equal(creator.account.address.toLowerCase());
-      await game.write.moveShip([1n, 2n, 2, 2, ActionType.Pass, 0n], {
-        account: creator.account,
-      });
+      // Any legal move completes the round; use the ship's real movement
+      // instead of a hardcoded 2-3 tile walk (ships' movement is random and
+      // can be as low as 1).
+      await moveShipWithinMovement(game, 1n, 2n, creator.account);
     });
 
     it("should not end round when joiner has more ships until all surviving ships have moved (no skipped ships)", async function () {
@@ -2789,9 +2898,10 @@ describe("Game", function () {
 
       // Creator's round-2 move (the ShipDestroyed revert attempt above
       // didn't consume creator's turn).
-      await game.write.moveShip([1n, 2n, 2, 3, ActionType.Pass, 0n], {
-        account: creator.account,
-      });
+      // Any legal move completes the round; use the ship's real movement
+      // instead of a hardcoded 2-3 tile walk (ships' movement is random and
+      // can be as low as 1).
+      await moveShipWithinMovement(game, 1n, 2n, creator.account);
     });
 
     it("should prevent destroying already destroyed ships", async function () {
@@ -3666,16 +3776,19 @@ describe("Game", function () {
         generateStartingPositions([6n], false),
       ]);
 
-      // Get initial positions and attributes
       let gameData = (await game.read.getGame([1n])) as unknown as GameDataView;
-      let creatorPos = findShipPosition(gameData, 1n);
-      let joinerPos = findShipPosition(gameData, 6n);
 
       // Move ships to positions where they can see each other but with a wall between them
       // Creator at (5, 2), Joiner at (5, 14) - same row, different columns
       // Use debugMove for this
       await setShipPosition(game.address, 1n, 1n, 5, 2);
       await setShipPosition(game.address, 1n, 6n, 5, 14);
+      // The ships now sit at those squares, so every move below acts IN PLACE
+      // from them. (An earlier version moved to the ships' original start
+      // squares, turning this into a 7-tile walk back; it only passed while a
+      // ship's movement happened to cover that distance, and failed with
+      // InvalidMove from the movement check — not line of sight — once movement
+      // changed.)
 
       // Create a wall between the ships to block line of sight
       // Wall at row 5, columns 8-10 (blocking the direct path)
@@ -3693,7 +3806,7 @@ describe("Game", function () {
       ) {
         // Let joiner pass their turn
         await game.write.moveShip(
-          [1n, 6n, joinerPos.row, joinerPos.col, ActionType.Pass, 0n],
+          [1n, 6n, 5, 14, ActionType.Pass, 0n],
           { account: joiner.account },
         );
       }
@@ -3703,7 +3816,7 @@ describe("Game", function () {
       // The key point is that line of sight is not checked for special actions.
       try {
         await game.write.moveShip(
-          [1n, 1n, creatorPos.row, creatorPos.col, ActionType.Special, 6n],
+          [1n, 1n, 5, 2, ActionType.Special, 6n],
           { account: creator.account },
         );
         // If this succeeds, it means line of sight wasn't checked (which is correct)
@@ -3819,9 +3932,10 @@ describe("Game", function () {
 
       // Verify round completion works correctly with the ship having 0 hull points
       // Move the remaining ships to complete the round
-      await game.write.moveShip([1n, 2n, 2, 2, ActionType.Pass, 0n], {
-        account: creator.account,
-      });
+      // Any legal move completes the round; use the ship's real movement
+      // instead of a hardcoded 2-3 tile walk (ships' movement is random and
+      // can be as low as 1).
+      await moveShipWithinMovement(game, 1n, 2n, creator.account);
       await moveShipWithinMovement(
         game,
         1n,
@@ -3852,9 +3966,10 @@ describe("Game", function () {
           (await game.read.getGame([1n])) as any
         ).turnState.currentTurn.toLowerCase(),
       ).to.equal(creator.account.address.toLowerCase());
-      await game.write.moveShip([1n, 2n, 2, 3, ActionType.Pass, 0n], {
-        account: creator.account,
-      });
+      // Any legal move completes the round; use the ship's real movement
+      // instead of a hardcoded 2-3 tile walk (ships' movement is random and
+      // can be as low as 1).
+      await moveShipWithinMovement(game, 1n, 2n, creator.account);
     });
   });
 
@@ -4235,7 +4350,7 @@ describe("Game", function () {
       // different variant number, which would need its own full
       // ShipAttributes setup (cost/traits config) that this fixture doesn't
       // provide for anything beyond variants 1/2.
-      await game.write.setFactionAbilityResolver([2, zeroAddress, false], {
+      await game.write.setFactionAbilityResolver([2, zeroAddress], {
         account: owner.account,
       });
       await setShipFaction(ships, owner, 1n, 2);
@@ -5909,7 +6024,7 @@ describe("Game", function () {
         name: "Drone Swarm Ship",
         id: 1n,
         owner: creator.account.address,
-        special: 5, // DroneSwarm
+        special: 2, // DroneSwarm (variant 2's slot 2)
         variant: 2,
       });
       await ships.write.customizeShip([1n, droneSwarmShip], {
@@ -5989,7 +6104,7 @@ describe("Game", function () {
         name: "Drone Swarm Ship",
         id: 1n,
         owner: creator.account.address,
-        special: 5, // DroneSwarm
+        special: 2, // DroneSwarm (variant 2's slot 2)
         variant: 2,
       });
       await ships.write.customizeShip([1n, droneSwarmShip], {
@@ -6056,7 +6171,7 @@ describe("Game", function () {
         name: "Drone Swarm Ship",
         id: 1n,
         owner: creator.account.address,
-        special: 5, // DroneSwarm
+        special: 2, // DroneSwarm (variant 2's slot 2)
         variant: 2,
       });
       await ships.write.customizeShip([1n, droneSwarmShip], {
@@ -6135,7 +6250,7 @@ describe("Game", function () {
         name: "Electric Storm Ship",
         id: 1n,
         owner: creator.account.address,
-        special: 4, // ElectricStorm
+        special: 1, // ElectricStorm (variant 2's slot 1)
         variant: 2,
       });
       await ships.write.customizeShip([1n, stormShip], {
@@ -6238,7 +6353,7 @@ describe("Game", function () {
         name: "Thruster Ship",
         id: 1n,
         owner: creator.account.address,
-        special: 6, // AdditionalThruster
+        special: 3, // AdditionalThruster (variant 2's slot 3)
         variant: 2,
       });
       await ships.write.customizeShip([1n, thrusterShip], {
@@ -6318,16 +6433,18 @@ describe("Game", function () {
         { account: owner.account },
       );
 
-      // Special is a per-faction local slot now — Game.specialResolvers is
+      // Special is a per-faction local slot — Game.specialResolvers is
       // keyed by (variant, slot), and Drone Swarm's resolver is only
-      // registered at (variant 2, slot 5). A variant-1 ship equipping slot
-      // 5 hits an unregistered (variant, slot) pair entirely, reverting
-      // InvalidMove before any range check ever runs.
+      // registered at (variant 2, slot 2). A variant-1 ship equipping slot
+      // 5 (unused for that faction) hits an unregistered (variant, slot)
+      // pair entirely, reverting InvalidMove before any range check ever
+      // runs. (Slot 2 would NOT do this: variant 1's slot 2 is its own,
+      // unrelated RepairDrones special.)
       const wrongFactionShip = buildCustomShip({
         name: "Wrong Faction Ship",
         id: 1n,
         owner: creator.account.address,
-        special: 5, // DroneSwarm
+        special: 5, // no resolver registered for (variant 1, slot 5)
         variant: 1,
       });
       await ships.write.customizeShip([1n, wrongFactionShip], {

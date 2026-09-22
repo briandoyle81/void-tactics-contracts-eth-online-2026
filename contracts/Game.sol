@@ -37,15 +37,6 @@ contract Game is Ownable {
     // with no upper bound other than uint16's range.
     mapping(uint16 => address) public factionAbilityResolvers;
 
-    // Whether a given faction's innate ability heals a friendly ship (true
-    // for RepairResolver-shaped abilities, false for e.g. RamResolver) —
-    // lets AIBehavior.decideSupport (single-player AI) recognize "does my
-    // faction have a heal I should use on a hurt ally" generically, purely
-    // from this per-faction data, instead of hardcoding a growing chain of
-    // `if (variant == 2) ... else if (variant == 3) ...` as more factions
-    // ship their own faction ability.
-    mapping(uint16 => bool) public factionAbilityIsHeal;
-
     // Owner-authorized resolver contract for each equipped Special item,
     // dispatched via ActionType.Special — keyed by BOTH traits.variant and
     // equipment.special, since Special is a per-faction local slot (0-7),
@@ -133,11 +124,9 @@ contract Game is Ownable {
 
     function setFactionAbilityResolver(
         uint16 _variant,
-        address _resolver,
-        bool _isHeal
+        address _resolver
     ) public onlyOwner {
         factionAbilityResolvers[_variant] = _resolver;
-        factionAbilityIsHeal[_variant] = _isHeal;
     }
 
     function setSpecialResolver(
@@ -318,11 +307,13 @@ contract Game is Ownable {
     // Calculate and store attributes for a ship in a game.
     // Left public/permissionless on purpose so players can self-serve this during
     // fleet setup, but the write is snapshot-once: `attributes.version` is 0 only
-    // until the first calculation, and ShipAttributes.currentAttributesVersion is
-    // seeded to 1 and only ever increases, so a non-zero version reliably means
-    // "already set for this game." Without this guard, anyone could call this again
-    // mid-game to pull in a newer ShipAttributes version/cost update, silently
-    // breaking the snapshot the game is supposed to lock in at start.
+    // until the first calculation. ShipAttributes versions are per variant and
+    // start at 1 on first publish (a rollback can't reach 0 either), so a
+    // non-zero version reliably means "already set for this game." That stored
+    // version is also the game's pin: special resolvers read special data at it
+    // (ShipAttributes.getSpecialRangeAt/StrengthAt). Without this guard, anyone
+    // could call this again mid-game to pull in a newer ShipAttributes version,
+    // silently breaking the snapshot the game is supposed to lock in at start.
     function calculateShipAttributes(uint _gameId, uint _shipId) public {
         GameData storage game = games[_gameId];
         Attributes storage attributes = game.shipAttributes[_shipId];

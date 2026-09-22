@@ -1,3 +1,5 @@
+import { attributeParams, costsParams } from "./attributeTables";
+
 /**
  * Seeds variant 1's Costs + VariantAttributeData on a standalone-deployed
  * ShipAttributes contract (i.e. one deployed directly via
@@ -17,7 +19,7 @@ export async function seedVariant1Attributes(
   await shipAttributes.write.setCosts(
     [
       1,
-      {
+      costsParams({
         version: 0,
         baseCost: 50,
         accuracy: [0, 10, 25],
@@ -27,18 +29,17 @@ export async function seedVariant1Attributes(
         armor: [0, 5, 10, 15],
         shields: [0, 10, 20, 30],
         special: [0, 10, 20, 15, 15, 20, 10, 0],
-      },
+      }),
     ],
     { account: ownerAccount },
   );
 
   await shipAttributes.write.setVariantAttributes(
     [
-      {
-        version: 1,
+      attributeParams({
         variant: 1,
         baseHull: 100,
-        baseSpeed: 3,
+        baseSpeed: 4,
         foreAccuracy: [0, 25, 50],
         hull: [0, 10, 20],
         engineSpeeds: [0, 1, 2],
@@ -65,12 +66,12 @@ export async function seedVariant1Attributes(
           { range: 1, strength: 1, movement: 0 }, // EMP
           { range: 3, strength: 40, movement: 0 }, // RepairDrones
           { range: 3, strength: 30, movement: 0 }, // FlakArray
-          { range: 0, strength: 0, movement: 0 }, // ElectricStorm (inert for variant 1)
-          { range: 0, strength: 0, movement: 0 }, // DroneSwarm (inert for variant 1)
-          { range: 0, strength: 0, movement: 0 }, // AdditionalThruster (inert for variant 1)
-          { range: 0, strength: 0, movement: 0 }, // future4
+          { range: 0, strength: 0, movement: 0 }, // Slot4 (unused)
+          { range: 0, strength: 0, movement: 0 }, // Slot5 (unused)
+          { range: 0, strength: 0, movement: 0 }, // Slot6 (unused)
+          { range: 0, strength: 0, movement: 0 }, // Slot7 (unused)
         ],
-      },
+      }),
     ],
     { account: ownerAccount },
   );

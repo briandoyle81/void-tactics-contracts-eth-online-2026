@@ -238,6 +238,21 @@ off the `afterSwap` callback, not something router-specific.
 Swap direction reminder: `zeroForOne: false` (currency1/UTC → currency0/ETH)
 is a sell and earns entries; `zeroForOne: true` is a buy and does not.
 
+**Confirmed 2026-09-18 — do not link out to Uniswap's own hosted swap UI
+(app.uniswap.org) for the sell-to-earn-entry flow, even where it's
+available.** This was checked directly, not assumed: as of this writing,
+Uniswap's hosted interface doesn't list Base Sepolia in its network switcher
+at all (per Uniswap's own "Testnets on Uniswap" support article), but that's
+not actually the operative reason — **even if it did support this network,
+it has no way to know about this hook's custom `hookData` convention**, so a
+sell routed through it would execute completely normally and silently earn
+no entry, for the same reason described in 4.2 above. This applies to *any*
+third-party swap interface, not just Uniswap's own — the `hookData`
+requirement is project-specific, not something any external router or UI
+has a reason to implement. Build the sell-side swap directly (4.3); the buy
+direction (native → UTC) has no such requirement and is unaffected by any of
+this.
+
 ### 4.4 Read functions for UI
 
 ```solidity

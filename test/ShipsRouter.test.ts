@@ -3,6 +3,7 @@ import { loadFixture } from "@nomicfoundation/hardhat-toolbox-viem/network-helpe
 import hre from "hardhat";
 import { zeroAddress } from "viem";
 import { seedVariant1Attributes } from "./fixtures/seedVariant1Attributes";
+import { costsParams } from "./fixtures/attributeTables";
 
 // Standalone unit tests for ShipsRouter.sol's dispatch logic: does an id
 // resolve to Ships.sol (human) or AIShips.sol (AI) correctly, and does
@@ -35,7 +36,7 @@ describe("ShipsRouter", function () {
     await shipAttributes.write.setCosts(
       [
         2,
-        {
+        costsParams({
           version: 0,
           baseCost: 50,
           accuracy: [0, 10, 25],
@@ -45,7 +46,7 @@ describe("ShipsRouter", function () {
           armor: [0, 5, 10, 15],
           shields: [0, 10, 20, 30],
           special: [0, 10, 20, 15, 15, 20, 10, 0],
-        },
+        }),
       ],
       { account: owner.account },
     );
@@ -375,7 +376,7 @@ describe("ShipsRouter", function () {
       await shipAttributes.write.setCosts(
         [
           3,
-          {
+          costsParams({
             version: 0,
             baseCost: 50,
             accuracy: [0, 10, 25],
@@ -385,7 +386,7 @@ describe("ShipsRouter", function () {
             armor: [0, 5, 10, 15],
             shields: [0, 10, 20, 30],
             special: [0, 10, 20, 15, 15, 20, 10, 0],
-          },
+          }),
         ],
         { account: owner.account },
       );

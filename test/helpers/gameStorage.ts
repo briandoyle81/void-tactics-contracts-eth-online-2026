@@ -31,10 +31,10 @@ import {
 // ---- Game.sol / Types.sol storage layout constants ----
 
 // Game.sol's own state variables start at slot 1 (slot 0 is Ownable's
-// _owner). `games` is the 10th one declared (ships, fleets, shipAttributes,
-// maps, isAllowedToStartGames, factionAbilityResolvers, factionAbilityIsHeal,
-// specialResolvers, healCapPercent, games) -> slot 10.
-const GAMES_SLOT = 10n;
+// _owner). `games` is the 9th one declared (ships, fleets, shipAttributes,
+// maps, isAllowedToStartGames, factionAbilityResolvers, specialResolvers,
+// healCapPercent, games) -> slot 9.
+const GAMES_SLOT = 9n;
 
 // GameData (Types.sol) field offsets, relative to a given game's base slot.
 const GD_SHIP_ATTRIBUTES = 22n;
@@ -268,6 +268,27 @@ export async function setShipHullPointsToZero(
     gameAddress,
     gameSlot + GD_SHIPS_WITH_ZERO_HP,
     shipId
+  );
+}
+
+// Sets a ship's current hull points to `hp` (an "injured but alive" ship when
+// 0 < hp < max). Only the hull byte is written; use setShipHullPointsToZero
+// for a downed ship, which also needs the zero-HP bookkeeping.
+export async function setShipHullPoints(
+  gameAddress: string,
+  gameId: bigint,
+  shipId: bigint,
+  hp: number
+): Promise<void> {
+  const attrSlot0 = mappingSlot(
+    shipId,
+    gameBaseSlot(gameId) + GD_SHIP_ATTRIBUTES
+  );
+  const attrWord = await readWord(gameAddress, attrSlot0);
+  await setStorageAt(
+    gameAddress,
+    attrSlot0,
+    writeByteRange(attrWord, ATTR_HULL_POINTS_BYTE_OFFSET, 1, BigInt(hp))
   );
 }
 

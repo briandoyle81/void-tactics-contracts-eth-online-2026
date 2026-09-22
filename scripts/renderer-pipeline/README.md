@@ -347,9 +347,12 @@ theme (`medium-mining-laser`->Laser/"Medium Mining Laser",
 `linear-accelerator`->Railgun/"Linear Accelerator",
 `torpedo-launcher`->MissileLauncher/"Torpedo Launcher",
 `mining-drill`->PlasmaCannon/"Mining Drill"); special art maps by matching
-each slot's real resolver identity (`lightening-field`->Slot4/"Lightening
-Field", `attack-drones`->Slot5/"Attack Drones",
-`aux-engine`->Slot6/"Aux Engine"); `fore-3`/`fore-special` fill the same
+each slot's real resolver identity (`lightening-field`->Slot1/"Lightening
+Field", `attack-drones`->Slot2/"Attack Drones",
+`aux-engine`->Slot3/"Aux Engine" -- variant 2's own slot numbering, moved
+from 4/5/6 on 2026-09-20 since a special's behavior is looked up by variant
+then slot; the leaf contracts were renamed `RenderSpecial4V2`/`5V2`/`6V2` ->
+`RenderSpecial1V2`/`2V2`/`3V2` to match); `fore-3`/`fore-special` fill the same
 structural slots variant 1's `fore-2`/`fore-perfect` do. The generated
 `contracts/RenderersV2/` leaves, `contracts/ImageRendererV2.sol`, and
 `gen-combiners.js`-produced combiners are deployed for real in

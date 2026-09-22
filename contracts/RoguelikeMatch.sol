@@ -12,10 +12,9 @@ import "./IMaps.sol";
 import "./IShipAttributes.sol";
 import "./AIBehavior.sol";
 import "./IFleets.sol";
-import "./IHealFactionAbility.sol";
 import "./RoguelikeNodeMap.sol";
 import "./RoguelikeRun.sol";
-import "./RoguelikeAIController.sol";
+import "./AIBehaviorRegistry.sol";
 import "./IWinEffect.sol";
 
 // Orchestrates the roguelike campaign mode: a player commits a fleet once
@@ -38,7 +37,9 @@ contract RoguelikeMatch is Ownable, IGameOrchestrator {
     IShipAttributes public shipAttributes;
     RoguelikeNodeMap public nodeMap;
     RoguelikeRun public runLedger;
-    RoguelikeAIController public aiController;
+    // Maps each faction (variant) to its own AI decision contract — see
+    // AIBehaviorRegistry/IVariantAI.
+    AIBehaviorRegistry public aiRegistry;
 
     // Disjoint from Lobbies' gameId space (small ints) and from
     // SinglePlayerMatch.NODE_MATCH_ID_OFFSET (2**40) — see that constant's
@@ -93,7 +94,7 @@ contract RoguelikeMatch is Ownable, IGameOrchestrator {
         address _shipAttributes,
         address _nodeMap,
         address _runLedger,
-        address _aiController
+        address _aiRegistry
     ) Ownable(msg.sender) {
         aiShips = AIShips(_aiShips);
         humanShips = IShips(_humanShips);
@@ -104,7 +105,7 @@ contract RoguelikeMatch is Ownable, IGameOrchestrator {
         shipAttributes = IShipAttributes(_shipAttributes);
         nodeMap = RoguelikeNodeMap(_nodeMap);
         runLedger = RoguelikeRun(_runLedger);
-        aiController = RoguelikeAIController(_aiController);
+        aiRegistry = AIBehaviorRegistry(_aiRegistry);
     }
 
     function setAIShipsAddress(address _aiShips) external onlyOwner {
@@ -143,8 +144,8 @@ contract RoguelikeMatch is Ownable, IGameOrchestrator {
         runLedger = RoguelikeRun(_runLedger);
     }
 
-    function setAIControllerAddress(address _aiController) external onlyOwner {
-        aiController = RoguelikeAIController(_aiController);
+    function setAIRegistryAddress(address _aiRegistry) external onlyOwner {
+        aiRegistry = AIBehaviorRegistry(_aiRegistry);
     }
 
     // ---- Run lifecycle ----
@@ -660,26 +661,14 @@ contract RoguelikeMatch is Ownable, IGameOrchestrator {
             gridHeight: game.GRID_HEIGHT()
         });
 
-        bool hasHealFactionAbility;
-        uint8 healFactionAbilityRange;
-        if (info.archetype == Archetype.Support) {
-            hasHealFactionAbility = game.factionAbilityIsHeal(info.variant);
-            if (hasHealFactionAbility) {
-                healFactionAbilityRange = IHealFactionAbility(
-                    game.factionAbilityResolvers(info.variant)
-                ).range();
-            }
-        }
-
+        // Chosen by variant first (each faction's AI is built around its own
+        // abilities), then by archetype inside that faction's contract. A
+        // variant with no registered AI reverts NoAIForVariant.
         return
-            aiController.decide(
+            aiRegistry.aiFor(info.variant).decide(
                 ctx,
-                shipAttributes,
                 info.archetype,
-                info.special,
-                info.variant,
-                hasHealFactionAbility,
-                healFactionAbilityRange
+                info.special
             );
     }
 

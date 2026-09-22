@@ -70,10 +70,11 @@ import { getEthUsdPrice, MAP_EDITOR } from "../ignition/modules/DeployAndConfig"
 // where this is a deliberate low-ceremony trade-off and nothing here has
 // real value; not fine the moment real funds are at stake.
 //
-// Output: writes { address, abi } for the hook to uniswap-lottery-hook.json
-// at the repo root as soon as the hook is confirmed deployed (before the
-// later liquidity/grant/smoke-test steps, which can still fail independently
-// -- the frontend needs this file regardless). Overwritten every run.
+// Output: writes { address, abi, poolId, poolKey } for the hook to
+// uniswap-lottery-hook.json at the repo root as soon as the hook is
+// confirmed deployed (before the later liquidity/grant/smoke-test steps,
+// which can still fail independently -- the frontend needs this file
+// regardless). Overwritten every run.
 //
 // Usage:
 //   npx hardhat run scripts/deployUTCLotteryPool.ts --network base-sepolia
@@ -575,19 +576,36 @@ async function main() {
     console.log("Hook deployed and verified:", hookAddress);
   }
 
+  // Hoisted up from where it's used later (step 11) so the pool id can be
+  // included in the output file below -- every field this needs
+  // (universalCreditsAddress, hookAddress) is already available by this
+  // point, no need to wait for the later steps.
+  const key = {
+    currency0: zeroAddress,
+    currency1: universalCreditsAddress,
+    fee: FEE,
+    tickSpacing: TICK_SPACING,
+    hooks: hookAddress,
+  } as const;
+  const poolId = computePoolId(key);
+
   // Written as soon as the hook is confirmed deployed (whether just now or
-  // on a prior run) -- the frontend needs this address/ABI, and it shouldn't
-  // depend on the later, unrelated liquidity/grant/smoke-test steps
-  // succeeding. Overwritten every run, since the current deployment is what
-  // matters, not a history -- and per this file's header comment, a fresh
-  // Phase 1 redeploy is what actually changes this address, not re-running
-  // Phase 2 alone.
+  // on a prior run) -- the frontend needs this address/ABI/poolId, and it
+  // shouldn't depend on the later, unrelated liquidity/grant/smoke-test
+  // steps succeeding. Overwritten every run, since the current deployment is
+  // what matters, not a history -- and per this file's header comment, a
+  // fresh Phase 1 redeploy is what actually changes this address, not
+  // re-running Phase 2 alone.
   const hookOutputPath = path.join(__dirname, "..", "uniswap-lottery-hook.json");
   fs.writeFileSync(
     hookOutputPath,
-    JSON.stringify({ address: hookAddress, abi: hookArtifact.abi }, null, 2),
+    JSON.stringify(
+      { address: hookAddress, abi: hookArtifact.abi, poolId, poolKey: key },
+      null,
+      2,
+    ),
   );
-  console.log("Wrote hook address + ABI to", hookOutputPath);
+  console.log("Wrote hook address + ABI + poolId + poolKey to", hookOutputPath);
 
   // ---- Step 7b: read minEntryThresholdWei, size the smoke-test sell ------
   const minEntryThresholdWei = (await publicClient.readContract({
@@ -701,21 +719,14 @@ async function main() {
     `Liquidity math: amount0 (ETH) = ${formatEther(amount0Wei)}, amount1 (UC) = ${formatEther(lpSeedUcTarget)}, liquidityDelta = ${liquidityDelta.toString()}`,
   );
 
-  const key = {
-    currency0: zeroAddress,
-    currency1: universalCreditsAddress,
-    fee: FEE,
-    tickSpacing: TICK_SPACING,
-    hooks: hookAddress,
-  } as const;
-
   // ---- Step 11: initialize the pool --------------------------------------
   // See this script's header comment: the first successful call here
   // permanently locks the hook to this exact key -- not treated as precious
   // right now (no canonical UC token / accumulated history yet), but there's
   // no on-chain fix for a wrong key, so still verify carefully before
-  // sending.
-  const intendedPoolId = computePoolId(key);
+  // sending. key/poolId were already computed above, right before writing
+  // the output file.
+  const intendedPoolId = poolId;
   const poolLocked = (await publicClient.readContract({
     address: hookAddress,
     abi: hookAbi,
@@ -976,8 +987,9 @@ async function main() {
     swapHash ?? "(skipped -- SKIP_SMOKE_TEST was set)",
   );
   console.log(
-    `Hook address + ABI written to ${hookOutputPath} (step 7). PoolKey/sqrtPriceX96/salt above ` +
-      "aren't in that file -- copy them into a doc yourself if you want a durable record of those too.",
+    `Hook address + ABI + poolId + poolKey written to ${hookOutputPath} (step 7). ` +
+      "CREATE2 salt/sqrtPriceX96 above aren't in that file -- copy them into a doc yourself if " +
+      "you want a durable record of those too.",
   );
 }
 

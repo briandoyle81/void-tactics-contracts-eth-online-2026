@@ -23,7 +23,7 @@ import roguelikeStarterContent from "../data/roguelikeStarterContent.json";
 // is false — this is a plain build-time boolean (not an Ignition
 // parameter) so gated m.call(...) invocations are simply never added to the
 // deployment graph when false, rather than being skipped at execution time.
-const PRODUCTION = false;
+const PRODUCTION = true;
 
 // Address allowed to mint ships from the Firebase Flow backend, with the same
 // rights as ShipPurchaser.
@@ -74,7 +74,11 @@ const MAX_SANE_ETH_USD_PRICE = 50_000;
 // for, 2026-09-17) don't re-hit the API every time. An in-memory cache
 // wouldn't help here: each `npx hardhat ...` invocation is a fresh process,
 // so the cache has to survive across processes.
-const ETH_PRICE_CACHE_PATH = path.join(__dirname, "..", ".eth-price-cache.json");
+const ETH_PRICE_CACHE_PATH = path.join(
+  __dirname,
+  "..",
+  ".eth-price-cache.json",
+);
 const ETH_PRICE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 interface EthPriceCache {
@@ -261,9 +265,9 @@ const DeployModule = buildModule("DeployModule", (m) => {
   // -> check-sizes.js -> gen-combiners.js). Same shape as variant 1's
   // sub-renderer/combiner/ImageRenderer deploy above, just against
   // contracts/RenderersV2 and ImageRendererV2.sol.
-  const renderSpecial4V2 = m.contract("RenderSpecial4V2");
-  const renderSpecial5V2 = m.contract("RenderSpecial5V2");
-  const renderSpecial6V2 = m.contract("RenderSpecial6V2");
+  const renderSpecial1V2 = m.contract("RenderSpecial1V2");
+  const renderSpecial2V2 = m.contract("RenderSpecial2V2");
+  const renderSpecial3V2 = m.contract("RenderSpecial3V2");
 
   const renderAft0V2 = m.contract("RenderAft0V2");
   const renderAft1V2 = m.contract("RenderAft1V2");
@@ -289,7 +293,7 @@ const DeployModule = buildModule("DeployModule", (m) => {
   const renderBaseBodyV2 = m.contract("RenderBaseBodyV2");
 
   const renderSpecialV2 = m.contract("RenderSpecialV2", [
-    [renderSpecial4V2, renderSpecial5V2, renderSpecial6V2],
+    [renderSpecial1V2, renderSpecial2V2, renderSpecial3V2],
   ]);
 
   const renderAftV2 = m.contract("RenderAftV2", [
@@ -504,7 +508,6 @@ const DeployModule = buildModule("DeployModule", (m) => {
     game,
     aiEncounters,
     maps,
-    shipAttributes,
     nodeMap,
     fleets,
   ]);
@@ -527,7 +530,11 @@ const DeployModule = buildModule("DeployModule", (m) => {
   const nodeContentRegistry = m.contract("NodeContentRegistry");
 
   const roguelikeRun = m.contract("RoguelikeRun");
-  const roguelikeAIController = m.contract("RoguelikeAIController");
+  // Central variant -> AI-contract lookup shared by SinglePlayerMatch and
+  // RoguelikeMatch (see AIBehaviorRegistry.sol). Each faction's AI contract
+  // is deployed and registered further down, next to that faction's
+  // resolvers (Variant2AI needs the repair resolver).
+  const aiBehaviorRegistry = m.contract("AIBehaviorRegistry");
   const roguelikeMatch = m.contract("RoguelikeMatch", [
     aiShips,
     ships,
@@ -538,7 +545,7 @@ const DeployModule = buildModule("DeployModule", (m) => {
     shipAttributes,
     roguelikeNodeMap,
     roguelikeRun,
-    roguelikeAIController,
+    aiBehaviorRegistry,
   ]);
   // Resupply-node actions (repair, roster changes) split into their own
   // contract purely for size — see RoguelikeResupply.sol's header comment.
@@ -742,7 +749,9 @@ const DeployModule = buildModule("DeployModule", (m) => {
   // ShipAttributes.setVariantAttributes without redeploying a resolver.
   // Special is a per-faction local slot (0-7), not a global identity, so
   // each resolver is told its own slot at deploy time (third constructor
-  // arg) — these three happen to be faction 1's slots 1/2/3.
+  // arg) — these three are faction 1's slots 1/2/3. A slot's behavior and
+  // strength are looked up by variant first, then slot, so faction 2's
+  // slots 1/2/3 below are unrelated to these.
   const empResolver = m.contract("EMPResolver", [game, shipAttributes, 1]);
   const repairDronesResolver = m.contract("RepairDronesResolver", [
     game,
@@ -757,20 +766,21 @@ const DeployModule = buildModule("DeployModule", (m) => {
 
   // Faction 2's equipped-Special resolvers: Electric Storm and Drone Swarm,
   // deployed the same way as faction 1's EMP/RepairDrones/FlakArray above —
-  // faction 2's slots 4/5. Additional Thruster (the third variant-2
-  // special, slot 6) is deliberately never registered as a resolver — it's
+  // faction 2's slots 1/2 (faction 2's own numbering, independent of
+  // faction 1's slots 1/2). Additional Thruster (the third variant-2
+  // special, slot 3) is deliberately never registered as a resolver — it's
   // a pure passive movement bonus (SpecialData.movement), so
-  // Game.specialResolvers[2][Slot6] staying unset is what makes trying to
+  // Game.specialResolvers[2][Slot3] staying unset is what makes trying to
   // *use* it as an action revert.
   const electricStormResolver = m.contract("ElectricStormResolver", [
     game,
     shipAttributes,
-    4,
+    1,
   ]);
   const droneSwarmResolver = m.contract("DroneSwarmResolver", [
     game,
     shipAttributes,
-    5,
+    2,
   ]);
 
   // Set all config values in a single call. gameAddress/fleetsAddress are
@@ -842,27 +852,26 @@ const DeployModule = buildModule("DeployModule", (m) => {
   );
 
   // Wire RamResolver/RepairResolver in as the faction ability resolvers for
-  // factions 1/2. The third arg (isHeal) is what lets AIBehavior.
-  // decideSupport recognize "this faction's innate ability heals a friendly
-  // ship" generically (Game.factionAbilityIsHeal), instead of hardcoding a
-  // per-variant branch for every faction that ships a heal ability.
+  // factions 1/2. Whether a faction's ability heals is not recorded on Game:
+  // each faction's own AI contract (Variant1AI/Variant2AI, registered in
+  // AIBehaviorRegistry) knows what its faction can do.
   const setFactionAbilityResolverCall = m.call(
     game,
     "setFactionAbilityResolver",
-    [1, ramResolver, false],
+    [1, ramResolver],
   );
   const setFaction2AbilityResolverCall = m.call(
     game,
     "setFactionAbilityResolver",
-    [2, repairResolver, true],
+    [2, repairResolver],
     { id: "SetFaction2AbilityResolver" },
   );
 
   // Wire the equipped-Special resolvers in — keyed by (variant, slot), since
   // Special is a per-faction local slot (0-7), not a global identity.
   // Faction 1: Slot1=EMP, Slot2=RepairDrones, Slot3=FlakArray. Faction 2:
-  // Slot4=ElectricStorm, Slot5=DroneSwarm, Slot6=AdditionalThruster (no
-  // resolver — passive-only), Slot7=unused.
+  // Slot1=ElectricStorm, Slot2=DroneSwarm, Slot3=AdditionalThruster (no
+  // resolver — passive-only). Slots 4-7 are unused for both factions.
   const setEMPResolverCall = m.call(
     game,
     "setSpecialResolver",
@@ -884,22 +893,50 @@ const DeployModule = buildModule("DeployModule", (m) => {
   const setElectricStormResolverCall = m.call(
     game,
     "setSpecialResolver",
-    [2, 4, electricStormResolver],
+    [2, 1, electricStormResolver],
     { id: "SetElectricStormResolver" },
   );
   const setDroneSwarmResolverCall = m.call(
     game,
     "setSpecialResolver",
-    [2, 5, droneSwarmResolver],
+    [2, 2, droneSwarmResolver],
     { id: "SetDroneSwarmResolver" },
+  );
+
+  // Per-faction AI decision contracts, registered by variant in
+  // AIBehaviorRegistry (looked up by SinglePlayerMatch and RoguelikeMatch).
+  // Each is built around what its own faction has: Variant1AI knows healing
+  // is an equipped special (variant 1's slot 2) and has no ram logic;
+  // Variant2AI knows every ship has the repair faction ability (heal range
+  // read from repairResolver) and no ram. Upgrading a faction's AI later =
+  // deploy the new contract and registry.setVariantAI(variant, newAddress).
+  const variant1AI = m.contract("Variant1AI", [shipAttributes, ramResolver]);
+  const variant2AI = m.contract("Variant2AI", [repairResolver, shipAttributes]);
+  const setVariant1AICall = m.call(
+    aiBehaviorRegistry,
+    "setVariantAI",
+    [1, variant1AI],
+    { id: "SetVariant1AI" },
+  );
+  const setVariant2AICall = m.call(
+    aiBehaviorRegistry,
+    "setVariantAI",
+    [2, variant2AI],
+    { id: "SetVariant2AI" },
+  );
+  const setSinglePlayerMatchAIRegistryCall = m.call(
+    singlePlayerMatch,
+    "setAIRegistryAddress",
+    [aiBehaviorRegistry],
+    { id: "SetSinglePlayerMatchAIRegistry" },
   );
 
   // Display names for each faction's real specials — RenderMetadata.
   // specialNames, keyed by (variant, slot) since a slot's meaning (and so
   // its name) is per-faction. Slot 0 (None) needs no entry — RenderMetadata
   // hardcodes "No Special" for it universally. Unset (variant, slot) pairs
-  // (e.g. faction 1's slots 4-7, faction 2's slots 1-3/6/7) fall back to
-  // "Unknown" — those slots are either inert or unused for that faction.
+  // (e.g. slots 4-7 for either faction) fall back to "Unknown" — those
+  // slots are either inert or unused for that faction.
   const setEMPNameCall = m.call(
     metadataRenderer,
     "setSpecialName",
@@ -921,19 +958,19 @@ const DeployModule = buildModule("DeployModule", (m) => {
   const setElectricStormNameCall = m.call(
     metadataRenderer,
     "setSpecialName",
-    [2, 4, "Lightening Field"],
+    [2, 1, "Lightening Field"],
     { id: "SetElectricStormName" },
   );
   const setDroneSwarmNameCall = m.call(
     metadataRenderer,
     "setSpecialName",
-    [2, 5, "Attack Drones"],
+    [2, 2, "Attack Drones"],
     { id: "SetDroneSwarmName" },
   );
   const setAdditionalThrusterNameCall = m.call(
     metadataRenderer,
     "setSpecialName",
-    [2, 6, "Aux Engine"],
+    [2, 3, "Aux Engine"],
     { id: "SetAdditionalThrusterName" },
   );
 
@@ -1068,42 +1105,79 @@ const DeployModule = buildModule("DeployModule", (m) => {
     { id: "SetHeavyShieldsNameV2" },
   );
 
-  // Costs and attributes are both per-variant (ShipAttributes.
-  // costsByVariant / VariantAttributeData.{baseHull,baseSpeed,guns,armors,
-  // shields}) — each variant needs its own setCosts + setVariantAttributes
-  // call, and neither is seeded in the constructor: every variant,
-  // including 1, is unconfigured (fails loud) until these calls run. This
-  // IS variant 1's and variant 2's data, not an override of some default —
-  // edit the numbers here directly to rebalance either faction. Variant 1
-  // and variant 2 each have their own fully separate set of consts below
-  // (deliberately not shared) so they can be given different initial
-  // values independently.
+  // Costs and attributes are both per-variant and versioned the same way
+  // (ShipAttributes.costsByVariant / _attributesByVariant) — each variant
+  // needs its own setCosts + setVariantAttributes call, and neither is
+  // seeded in the constructor: every variant, including 1, is unconfigured
+  // (fails loud) until these calls run. Each call PUBLISHES a complete new
+  // version for that variant (version 1 here) and makes it live; the
+  // contract picks the version number itself. This IS variant 1's and
+  // variant 2's data, not an override of some default — edit the numbers
+  // here directly to rebalance either faction. Variant 1 and variant 2 each
+  // have their own fully separate set of consts below (deliberately not
+  // shared) so they can be given different initial values independently.
+  //
+  // Array lengths are validated on publish (ShipAttributes reverts
+  // InvalidArrayLength otherwise): weapon/armor/shield/special tables are
+  // indexed by enum value, so all 8 slots must exist — slots 4-7 are the
+  // `future*` enum values. GenerateNewShip never rolls them, but
+  // customizeShip/DroneYard/prize ships can equip any enum value, so they
+  // get inert filler (zero-stat gear; cost = the cheapest real entry so a
+  // future slot is never free-and-strong). Trait-tier arrays have 3 entries.
+  // Every array below is a full table, not a delta.
 
   // ---- Variant 1 ----
-  // Costs.special is indexed by the raw Special enum value — covers
-  // None/EMP/RepairDrones/FlakArray plus the three variant-2-only specials
-  // (ElectricStorm/DroneSwarm/AdditionalThruster). Point-costs currently
-  // match variant 2's numbers exactly (same values, independently editable
-  // consts) — retune either side's array on its own anytime.
-  const variant1SpecialCosts = [0, 10, 20, 15, 15, 20, 10, 0];
+  // Costs.special is indexed by the raw Special enum value, per variant —
+  // this faction's own None/EMP/RepairDrones/FlakArray in slots 0-3; slots
+  // 4-7 are unused (inert) for it, so they cost nothing. Retune this array on
+  // its own anytime; it shares nothing with variant 2's.
+  const variant1SpecialCosts = [0, 10, 20, 15, 0, 0, 0, 0];
   const variant1Guns = [
     { range: 3, damage: 50, movement: 0 }, // Laser
     { range: 6, damage: 40, movement: 0 }, // Railgun
     { range: 4, damage: 60, movement: -1 }, // MissileLauncher
     { range: 2, damage: 80, movement: 0 }, // PlasmaCannon
+    { range: 0, damage: 0, movement: 0 }, // future1 (inert filler)
+    { range: 0, damage: 0, movement: 0 }, // future2 (inert filler)
+    { range: 0, damage: 0, movement: 0 }, // future3 (inert filler)
+    { range: 0, damage: 0, movement: 0 }, // future4 (inert filler)
   ];
+  // Movement from defensive gear counts only for an EQUIPPED piece, and the
+  // "None" bonus (+1: lighter with nothing bolted on) is counted ONCE, for a
+  // ship carrying neither armor nor shields — taken from the ARMOR table's
+  // None entry (ShipAttributes._calculateMovement). A ship carries armor OR
+  // shields, so it gets its equipped piece's movement and nothing from the
+  // other, empty slot. The shields table's None movement is therefore never
+  // read; it is set to 0.
   const variant1Armors = [
-    { damageReduction: 0, movement: 1 }, // None
+    { damageReduction: 0, movement: 1 }, // None (the once-only no-gear bonus)
     { damageReduction: 15, movement: 0 }, // Light
     { damageReduction: 30, movement: -1 }, // Medium
     { damageReduction: 45, movement: -2 }, // Heavy
+    { damageReduction: 0, movement: 0 }, // future1 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future2 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future3 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future4 (inert filler)
   ];
   const variant1Shields = [
-    { damageReduction: 0, movement: 1 }, // None
+    { damageReduction: 0, movement: 0 }, // None (movement never read — see variant1Armors)
     { damageReduction: 15, movement: 1 }, // Light
     { damageReduction: 30, movement: 0 }, // Medium
     { damageReduction: 45, movement: -1 }, // Heavy
+    { damageReduction: 0, movement: 0 }, // future1 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future2 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future3 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future4 (inert filler)
   ];
+  // Kills needed for ranks 2..6, and stat bonus % for ranks 1..6 (applied to
+  // range/damage/hull/movement/damage-reduction). Thresholds must be
+  // strictly ascending; bonuses are capped at 100 by the contract.
+  // GenerateNewShip seeds prize-ship kill counts in ranges aligned to these
+  // thresholds (1-9 / 10-29 / 30-99 / 100-299), and TutorialClaim assumes
+  // 10 kills = rank 2 — retuning the thresholds shifts which rank those
+  // land on.
+  const variant1RankThresholds = [10, 30, 100, 300, 1000];
+  const variant1RankBonusPct = [0, 10, 20, 30, 40, 50];
 
   const setCostsVariant1Call = m.call(
     shipAttributes,
@@ -1116,9 +1190,10 @@ const DeployModule = buildModule("DeployModule", (m) => {
         accuracy: [0, 10, 25],
         hull: [0, 10, 25],
         speed: [0, 10, 25],
-        mainWeapon: [25, 30, 40, 40],
-        armor: [0, 5, 10, 15],
-        shields: [0, 10, 20, 30],
+        // Slots 4-7 are the inert `future*` filler (see header note).
+        mainWeapon: [25, 30, 40, 40, 25, 25, 25, 25],
+        armor: [0, 5, 10, 15, 0, 0, 0, 0],
+        shields: [0, 10, 20, 30, 0, 0, 0, 0],
         special: variant1SpecialCosts,
       },
     ],
@@ -1130,25 +1205,26 @@ const DeployModule = buildModule("DeployModule", (m) => {
     "setVariantAttributes",
     [
       {
-        version: 1,
         variant: 1,
         baseHull: 100,
-        baseSpeed: 3,
+        baseSpeed: 4,
         foreAccuracy: [0, 25, 50],
         hull: [0, 10, 20],
         engineSpeeds: [0, 1, 2],
         guns: variant1Guns,
         armors: variant1Armors,
         shields: variant1Shields,
+        rankThresholds: variant1RankThresholds,
+        rankBonusPct: variant1RankBonusPct,
         specials: [
           { range: 0, strength: 0, movement: 0 }, // None
           { range: 1, strength: 1, movement: 0 }, // EMP
           { range: 3, strength: 40, movement: 0 }, // RepairDrones
           { range: 3, strength: 30, movement: 0 }, // FlakArray
-          { range: 0, strength: 0, movement: 0 }, // ElectricStorm (inert for variant 1)
-          { range: 0, strength: 0, movement: 0 }, // DroneSwarm (inert for variant 1)
-          { range: 0, strength: 0, movement: 0 }, // AdditionalThruster (inert for variant 1)
-          { range: 0, strength: 0, movement: 0 }, // future4
+          { range: 0, strength: 0, movement: 0 }, // Slot4 (unused)
+          { range: 0, strength: 0, movement: 0 }, // Slot5 (unused)
+          { range: 0, strength: 0, movement: 0 }, // Slot6 (unused)
+          { range: 0, strength: 0, movement: 0 }, // Slot7 (unused)
         ],
       },
     ],
@@ -1156,28 +1232,66 @@ const DeployModule = buildModule("DeployModule", (m) => {
   );
 
   // ---- Variant 2 ----
-  // Point-costs for its own three specials (ElectricStorm/DroneSwarm/
-  // AdditionalThruster) are placeholders (loosely mirroring FlakArray/EMP/
-  // a cheap passive tier) — retune anytime via another setCosts call.
-  const variant2SpecialCosts = [0, 10, 20, 15, 15, 20, 10, 0];
+  // Costs.special is indexed by this faction's own slot numbers: slot 1 =
+  // ElectricStorm, 2 = DroneSwarm, 3 = AdditionalThruster; slots 4-7 are
+  // unused (inert, free). Point-costs for its three specials are
+  // placeholders (loosely mirroring FlakArray/EMP/a cheap passive tier) —
+  // retune anytime via another setCosts call.
+  const variant2SpecialCosts = [0, 15, 20, 10, 0, 0, 0, 0];
+  // Variant 2 is the heavy faction: compared with variant 1 its ships have
+  // ~25% more hull (base 125 vs 100, tiers 12/25 vs 10/20), one less base
+  // speed (3 vs 4), guns with ~1 less range but ~20% more damage, and
+  // heavier, tougher gear (armor/shields reduce ~33% more damage —
+  // 20/40/60% vs 15/30/45% — and the Heavy tier costs one more movement).
+  // Costs are identical to variant 1's, so overall strength is meant to match
+  // at equal fleet cost — the numbers were calibrated with a skirmish
+  // simulation (see docs/variant-balance.md and scripts/balance-sim/) that
+  // plays random equal-cost fleets against each other; re-run it after any
+  // retune. Damage reduction tops out at 60% per piece: DroneYard only allows
+  // armor OR shields (never both), so a ship's total stays at 60% (90% at rank
+  // 6's +50% bonus), safely below the 100% cap (which would make a ship immune).
+  // Indexed by MainWeapon enum value (Generic/Sniper/Missile/Close); the
+  // comments use variant 2's own weapon names (see the setMainWeaponName
+  // calls above), with variant 1's equivalent numbers for comparison.
   const variant2Guns = [
-    { range: 3, damage: 50, movement: 0 }, // Laser
-    { range: 6, damage: 40, movement: 0 }, // Railgun
-    { range: 4, damage: 60, movement: -1 }, // MissileLauncher
-    { range: 2, damage: 80, movement: 0 }, // PlasmaCannon
+    { range: 2, damage: 60, movement: 0 }, // Medium Mining Laser (v1 Laser: range 3, damage 50)
+    { range: 5, damage: 50, movement: 0 }, // Linear Accelerator (v1 Railgun: range 6, damage 40)
+    { range: 3, damage: 70, movement: -1 }, // Torpedo Launcher (v1 Missile Launcher: range 4, damage 60)
+    { range: 1, damage: 95, movement: 0 }, // Mining Drill (v1 Plasma Cannon: range 2, damage 80) — range 1 is deliberate (decided 2026-09-21): adjacent-only, so the bridge accuracy bonus never helps it
+    { range: 0, damage: 0, movement: 0 }, // future1 (inert filler)
+    { range: 0, damage: 0, movement: 0 }, // future2 (inert filler)
+    { range: 0, damage: 0, movement: 0 }, // future3 (inert filler)
+    { range: 0, damage: 0, movement: 0 }, // future4 (inert filler)
   ];
   const variant2Armors = [
-    { damageReduction: 0, movement: 1 }, // None
-    { damageReduction: 15, movement: 0 }, // Light
-    { damageReduction: 30, movement: -1 }, // Medium
-    { damageReduction: 45, movement: -2 }, // Heavy
+    { damageReduction: 0, movement: 1 }, // None (v1: 0% / move +1, unchanged; the once-only no-gear bonus)
+    { damageReduction: 20, movement: 0 }, // Light (v1: 15% / move 0)
+    { damageReduction: 40, movement: -1 }, // Medium (v1: 30% / move -1)
+    { damageReduction: 60, movement: -3 }, // Heavy (v1: 45% / move -2)
+    { damageReduction: 0, movement: 0 }, // future1 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future2 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future3 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future4 (inert filler)
   ];
   const variant2Shields = [
-    { damageReduction: 0, movement: 1 }, // None
-    { damageReduction: 15, movement: 1 }, // Light
-    { damageReduction: 30, movement: 0 }, // Medium
-    { damageReduction: 45, movement: -1 }, // Heavy
+    { damageReduction: 0, movement: 0 }, // None (v1: 0% / move 0, unchanged; movement never read — see variant1Armors)
+    { damageReduction: 20, movement: 0 }, // Light (v1: 15% / move +1)
+    { damageReduction: 40, movement: -1 }, // Medium (v1: 30% / move 0)
+    { damageReduction: 60, movement: -2 }, // Heavy (v1: 45% / move -1)
+    { damageReduction: 0, movement: 0 }, // future1 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future2 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future3 (inert filler)
+    { damageReduction: 0, movement: 0 }, // future4 (inert filler)
   ];
+  // Kills needed for ranks 2..6, and stat bonus % for ranks 1..6 (applied to
+  // range/damage/hull/movement/damage-reduction). Thresholds must be
+  // strictly ascending; bonuses are capped at 100 by the contract.
+  // GenerateNewShip seeds prize-ship kill counts in ranges aligned to these
+  // thresholds (1-9 / 10-29 / 30-99 / 100-299), and TutorialClaim assumes
+  // 10 kills = rank 2 — retuning the thresholds shifts which rank those
+  // land on.
+  const variant2RankThresholds = [10, 30, 100, 300, 1000];
+  const variant2RankBonusPct = [0, 10, 20, 30, 40, 50];
 
   const setCostsVariant2Call = m.call(
     shipAttributes,
@@ -1190,9 +1304,10 @@ const DeployModule = buildModule("DeployModule", (m) => {
         accuracy: [0, 10, 25],
         hull: [0, 10, 25],
         speed: [0, 10, 25],
-        mainWeapon: [25, 30, 40, 40],
-        armor: [0, 5, 10, 15],
-        shields: [0, 10, 20, 30],
+        // Slots 4-7 are the inert `future*` filler (see header note).
+        mainWeapon: [25, 30, 40, 40, 25, 25, 25, 25],
+        armor: [0, 5, 10, 15, 0, 0, 0, 0],
+        shields: [0, 10, 20, 30, 0, 0, 0, 0],
         special: variant2SpecialCosts,
       },
     ],
@@ -1204,25 +1319,26 @@ const DeployModule = buildModule("DeployModule", (m) => {
     "setVariantAttributes",
     [
       {
-        version: 1,
         variant: 2,
-        baseHull: 100,
+        baseHull: 125,
         baseSpeed: 3,
         foreAccuracy: [0, 25, 50],
-        hull: [0, 10, 20],
+        hull: [0, 12, 25],
         engineSpeeds: [0, 1, 2],
         guns: variant2Guns,
         armors: variant2Armors,
         shields: variant2Shields,
+        rankThresholds: variant2RankThresholds,
+        rankBonusPct: variant2RankBonusPct,
         specials: [
           { range: 0, strength: 0, movement: 0 }, // None
-          { range: 0, strength: 0, movement: 0 }, // EMP (inert for variant 2)
-          { range: 0, strength: 0, movement: 0 }, // RepairDrones (inert for variant 2)
-          { range: 0, strength: 0, movement: 0 }, // FlakArray (inert for variant 2)
-          { range: 2, strength: 1, movement: 0 }, // ElectricStorm
-          { range: 5, strength: 40, movement: 0 }, // DroneSwarm
-          { range: 0, strength: 0, movement: 3 }, // AdditionalThruster
-          { range: 0, strength: 0, movement: 0 }, // future4
+          { range: 2, strength: 1, movement: 0 }, // Slot1: ElectricStorm
+          { range: 5, strength: 40, movement: 0 }, // Slot2: DroneSwarm
+          { range: 0, strength: 0, movement: 3 }, // Slot3: AdditionalThruster
+          { range: 0, strength: 0, movement: 0 }, // Slot4 (unused)
+          { range: 0, strength: 0, movement: 0 }, // Slot5 (unused)
+          { range: 0, strength: 0, movement: 0 }, // Slot6 (unused)
+          { range: 0, strength: 0, movement: 0 }, // Slot7 (unused)
         ],
       },
     ],
@@ -1306,12 +1422,26 @@ const DeployModule = buildModule("DeployModule", (m) => {
   // strings instead of magic numbers — keep in sync if MapMode changes.
   const MAP_MODE: Record<string, number> = { PvP: 0, PvE: 1, Both: 2 };
 
+  // The roguelike campaign's first three missions fight variant 1 ships, but
+  // the NodeMap campaign's maps (and their variant-2 enemy placements) are
+  // shared by id, so those missions get their OWN maps — clones of the same
+  // layouts, with variant-1 rosters — listed in roguelikeStarterContent.json.
+  // They are appended AFTER every campaign map in the same chain, so the
+  // "id is 1-indexed array position" guess below stays trustworthy for both
+  // lists. Keys must be unique across the two lists.
+  const allMaps: any[] = [
+    ...starterContent.maps,
+    ...roguelikeStarterContent.maps,
+  ];
+  const allMapPlacements: any[] = [
+    ...starterContent.mapPlacements,
+    ...roguelikeStarterContent.mapPlacements,
+  ];
   const mapCalls: Record<string, ReturnType<typeof m.call>> = {};
   const mapIds: Record<string, bigint> = {};
-  starterContent.maps.forEach((map, i) => {
+  allMaps.forEach((map, i) => {
     const mapId = BigInt(i + 1);
-    const previousMapCall =
-      i > 0 ? mapCalls[starterContent.maps[i - 1].key] : undefined;
+    const previousMapCall = i > 0 ? mapCalls[allMaps[i - 1].key] : undefined;
     const mode = MAP_MODE[map.mode];
     const call =
       map.type === "scoring"
@@ -1374,7 +1504,7 @@ const DeployModule = buildModule("DeployModule", (m) => {
   );
 
   const placementCalls: ReturnType<typeof m.call>[] = [];
-  for (const placement of starterContent.mapPlacements) {
+  for (const placement of allMapPlacements) {
     const capitalizedKey = `${placement.mapKey[0].toUpperCase()}${placement.mapKey.slice(1)}`;
     placementCalls.push(
       m.call(
@@ -1383,7 +1513,7 @@ const DeployModule = buildModule("DeployModule", (m) => {
         [
           mapIds[placement.mapKey],
           placement.positions,
-          placement.configKeys.map((k) => aiConfigIds[k]),
+          placement.configKeys.map((k: string) => aiConfigIds[k]),
         ],
         {
           id: `Place${capitalizedKey}AIFleet`,
@@ -1488,8 +1618,8 @@ const DeployModule = buildModule("DeployModule", (m) => {
   // RoguelikeMatch.startRun always reverts CampaignNotFound/
   // CampaignHasNoRoot, so a player could never begin a run. Seeds a 35-node
   // graph (30 Combat + 5 Resupply) shaped like the existing NodeMap
-  // campaign — same 30 maps/AI placements already seeded above, same
-  // turnTime/maxScore/creatorGoesFirst per map, same main-spine (m01-m15) /
+  // campaign — same map layouts and turnTime/maxScore/creatorGoesFirst per
+  // map, same main-spine (m01-m15) /
   // dead-end-branch (d01-d06) / shortcut-branch (s01-s03) / finale-spine
   // (f01-f06) shape — but translated into RoguelikeNodeMap's parent-lists-
   // children + branch-lockout model instead of NodeMap's ANY-of-prerequisite
@@ -1502,6 +1632,17 @@ const DeployModule = buildModule("DeployModule", (m) => {
   // opportunity would be unplayable given roguelike damage persists across
   // the whole run. See ignition/data/roguelikeStarterContent.json for the
   // full node/edge data; MAP_EDITOR can extend the graph further afterward.
+  //
+  // ENEMY PROGRESSION: the first three missions on any path fight variant 1
+  // ships; every later mission fights variant 2. A node's mission number is
+  // the count of Combat nodes from the root to it, inclusive (m01 = 1, m02 = 2,
+  // then m03 / d01 / s01 = 3 on their respective branches, everything deeper
+  // is 4+). Nodes m01, m02, m03, d01 and s01 therefore use the roguelike-only
+  // maps (rlM01, rlM02, rlM03, rlD01, rlS01) with variant-1 rosters; the rest
+  // share the campaign maps, whose rosters are variant 2. Killing variant-1
+  // ships pays no DEC (only variant 2 has a reward token registered). See
+  // docs/roguelike-progression.md, and test/RoguelikeProgression.test.ts,
+  // which checks this rule against the deployed graph.
   const roguelikeContent = roguelikeStarterContent;
 
   const createRoguelikeCampaignCall = m.call(
@@ -2184,7 +2325,24 @@ const DeployModule = buildModule("DeployModule", (m) => {
       after: [
         setSinglePlayerMatchUniversalCreditsAddressCall,
         setSinglePlayerMatchHumanShipsAddressCall,
+        setSinglePlayerMatchAIRegistryCall,
       ],
+    });
+
+    // The registry and both variant AIs are Ownable (registry: who can point
+    // a faction at a new AI; AIs: their config addresses) — hand them to the
+    // same editor wallet as everything else, after the registrations above.
+    m.call(aiBehaviorRegistry, "transferOwnership", [MAP_EDITOR], {
+      id: "TransferAIBehaviorRegistryOwnership",
+      after: [setVariant1AICall, setVariant2AICall],
+    });
+
+    m.call(variant1AI, "transferOwnership", [MAP_EDITOR], {
+      id: "TransferVariant1AIOwnership",
+    });
+
+    m.call(variant2AI, "transferOwnership", [MAP_EDITOR], {
+      id: "TransferVariant2AIOwnership",
     });
 
     m.call(nodeMap, "transferOwnership", [MAP_EDITOR], {
@@ -2356,9 +2514,9 @@ const DeployModule = buildModule("DeployModule", (m) => {
     renderBody,
     renderFore,
     imageRenderer,
-    renderSpecial4V2,
-    renderSpecial5V2,
-    renderSpecial6V2,
+    renderSpecial1V2,
+    renderSpecial2V2,
+    renderSpecial3V2,
     renderAft0V2,
     renderAft1V2,
     renderAft2V2,
@@ -2407,7 +2565,9 @@ const DeployModule = buildModule("DeployModule", (m) => {
     roguelikeNodeMap,
     nodeContentRegistry,
     roguelikeRun,
-    roguelikeAIController,
+    aiBehaviorRegistry,
+    variant1AI,
+    variant2AI,
     roguelikeMatch,
     roguelikeResupply,
     decBonusWinEffect,

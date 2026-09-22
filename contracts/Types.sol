@@ -64,10 +64,13 @@ enum Special {
 // and looked up per minted AI ship (SinglePlayerMatch.shipArchetype) to pick
 // which ordered priority-list of rules takeAITurn applies to that ship.
 enum Archetype {
+    // Each faction's AI (Variant1AI / Variant2AI) writes its own tree per
+    // archetype, so the exact tactics differ by variant; these are the shared
+    // intents.
     Grunt, // shoot what's in range, else close distance
-    Aggressor, // prioritize kills over safety, closes distance hard
-    Sniper, // shoots at range, retreats rather than engaging adjacent
-    Support, // heals the weakest ally in range (RepairDrones), hangs back
+    Aggressor, // prioritize kills over safety, presses the fight
+    Sniper, // long-gun fire support; a skirmisher faction also kites
+    Support, // heals the most injured ally (each faction's own way), hangs back
     Turtle, // seeks/holds scoring tiles, fights only opportunistically
     Rammer // faction-1 only: hunts 0-HP enemies to Ram, else shoots
 }
@@ -283,7 +286,9 @@ struct Costs {
     uint8[] accuracy;
     uint8[] hull;
     uint8[] speed;
-    // Items are uint8[4]
+    // accuracy/hull/speed are indexed by trait tier (length 3); mainWeapon/
+    // armor/shields/special are indexed by their enum value (length 8 each).
+    // Lengths are enforced by ShipAttributes.setCosts.
     uint8[] mainWeapon;
     uint8[] armor;
     uint8[] shields;
@@ -293,8 +298,9 @@ struct Costs {
 // Be VERY CAREFUL giving negative movement!
 // It can result in ships that can't move
 
-// We don't need historical versions because this is just used to calculate
-// attributes, which are done at the start of the game and stay the same
+// Each variant keeps its own history of published attribute versions (see
+// ShipAttributes), and a game pins the version its ships were calculated
+// under, so a later publish never changes an in-flight game.
 
 struct GunData {
     uint8 range;
@@ -319,40 +325,38 @@ struct SpecialData {
 }
 
 // Everything a faction (traits.variant) needs to fully differentiate itself:
-// base stats, per-tier bonuses, weapon/armor/shield stats, and equipped
-// Special data. Nested in a mapping (not an array) inside AttributesVersion
-// since AttributesVersion only ever lives in storage (never copied to
-// memory), so a mapping field is safe here.
+// base stats, per-tier bonuses, weapon/armor/shield stats, equipped Special
+// data, and rank rules. One immutable VariantAttributeData exists per
+// (variant, version) in ShipAttributes — a published version is never
+// mutated, which is what lets a game pin the version it started with.
 struct VariantAttributeData {
     uint8 baseHull;
     uint8 baseSpeed;
     uint8[] foreAccuracy; // "bridge": indexed by traits.accuracy tier (0-2)
     uint8[] hull; // indexed by traits.hull tier (0-2)
     uint8[] engineSpeeds; // "engine": indexed by traits.speed tier (0-2)
-    GunData[] guns;
-    ArmorData[] armors;
-    ShieldData[] shields;
+    GunData[] guns; // indexed by MainWeapon enum (0-7)
+    ArmorData[] armors; // indexed by Armor enum (0-7)
+    ShieldData[] shields; // indexed by Shields enum (0-7)
     SpecialData[] specials; // indexed by Special enum (0-7)
-}
-
-// Just a version number and the per-variant data behind it — every stat
-// that used to live directly here (baseHull/baseSpeed/guns/armors/shields)
-// moved into VariantAttributeData so each faction can diverge fully.
-struct AttributesVersion {
-    uint16 version;
-    mapping(uint16 => VariantAttributeData) variantData; // keyed by traits.variant
+    // Kills (ShipData.shipsDestroyed) required to reach ranks 2..6 — length
+    // 5, strictly ascending, first entry > 0. rank = 1 + #(thresholds <= kills).
+    uint32[] rankThresholds;
+    // Stat bonus percent per rank, indexed by rank - 1 (length 6, each <= 100).
+    uint8[] rankBonusPct;
 }
 
 // Bundled into a struct rather than passed as flat parameters to
-// ShipAttributes.setVariantAttributes: it now covers every per-variant stat
-// (base hull/speed, tier bonuses, weapon/armor/shield stats, specials), and
-// legacy Solidity codegen runs out of stack slots quickly across an
-// external function with this many dynamic-array parameters (hit this
+// ShipAttributes.setVariantAttributes: it covers every per-variant stat
+// (base hull/speed, tier bonuses, weapon/armor/shield stats, specials, rank
+// rules), and legacy Solidity codegen runs out of stack slots quickly across
+// an external function with this many dynamic-array parameters (hit this
 // exact wall building the equipped-Special resolvers earlier this
 // session). Declared here (not nested in ShipAttributes) so
-// IShipAttributes can reference it too without a circular import.
+// IShipAttributes can reference it too without a circular import. There is
+// deliberately no `version` field: setVariantAttributes always publishes
+// latest + 1 for the variant (same as setCosts).
 struct SetVariantAttributesParams {
-    uint16 version;
     uint16 variant;
     uint8 baseHull;
     uint8 baseSpeed;
@@ -363,6 +367,8 @@ struct SetVariantAttributesParams {
     ArmorData[] armors;
     ShieldData[] shields;
     SpecialData[] specials;
+    uint32[] rankThresholds;
+    uint8[] rankBonusPct;
 }
 
 enum LobbyStatus {

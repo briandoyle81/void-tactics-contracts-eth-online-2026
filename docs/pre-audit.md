@@ -271,11 +271,13 @@ This is not commented out (unlike `Ships.sol` where it is commented). On a non-H
 
 ---
 
-### M-04 — `ShipAttributes` Attribute Version Arrays Can Be Out-of-Bounds Indexed
+### ~~M-04 — `ShipAttributes` Attribute Version Arrays Can Be Out-of-Bounds Indexed~~
 
 **File:** `contracts/ShipAttributes.sol`, lines 120–155; `contracts/GenerateNewShip.sol`, lines 88–109  
 **Severity:** Medium  
-**Status:** Won't fix (2026-07-16) — accepted as-is, not planned. Not struck through — left open for visibility, but no further action intended.
+**Status:** Fixed 2026-09-20 (previously marked Won't fix on 2026-07-16 — reopened by explicit decision during the per-variant attributes redesign).
+
+**Fix:** `ShipAttributes.setVariantAttributes` and `setCosts` now validate array lengths on publish and revert `InvalidArrayLength()` otherwise: `guns`/`armors`/`shields`/`specials` (and the cost tables `mainWeapon`/`armor`/`shields`/`special`) must have all 8 enum slots, and the trait-tier arrays (`foreAccuracy`/`hull`/`engineSpeeds`, cost `accuracy`/`hull`/`speed`) must have 3. A malformed table can therefore never go live. Reads for a never-configured variant now revert the named error `VariantNotConfigured(variant)` instead of an array-out-of-bounds panic. See `docs/ship-costs-and-attributes-runbook.md`. Original finding text follows.
 
 `calculateShipAttributes` indexes `attributesVersions[version].guns[uint8(_ship.equipment.mainWeapon)]` without checking array length. `MainWeapon`, `Armor`, `Shields`, and `Special` enums each have 8 values (including 4 `future*` placeholders). The `setAllAttributes` function takes arbitrary-length arrays. If a version is deployed with only 4 gun entries (current default) and a ship has equipment enum value 4–7 (`future1–future4`), the call panics with an out-of-bounds access. `GenerateNewShip` uses `% 4` for weapon generation, but `customizeShip` accepts arbitrary `Equipment` values.
 
@@ -640,7 +642,7 @@ Positions are first validated for column bounds (creator: 0–3, joiner: 13–16
 | ~~M-01~~ | ShipAttributes | `setCosts` | Medium | ~~Logic Bug~~ (Fixed) |
 | ~~M-02~~ | Game | `_performRepairDrones` | Medium | ~~Integer Overflow~~ (Fixed) |
 | ~~M-03~~ | UniversalCredits | import | Medium | ~~Production Readiness~~ (Fixed) |
-| M-04 | ShipAttributes | `calculateShipAttributes` | Medium | Array OOB (Won't Fix) |
+| ~~M-04~~ | ShipAttributes | `calculateShipAttributes` | Medium | ~~Array OOB~~ (Fixed) |
 | ~~M-05~~ | Lobbies | `createLobby`, `joinLobby` | Medium | ~~Fee Handling~~ (Fixed) |
 | ~~M-06~~ | Game | `_placeShipOnGrid` | Medium | ~~Bounds Check~~ (Fixed) |
 | ~~M-07~~ | Game | `endGameOnTimeout` | Medium | ~~Front-Running~~ (Not a bug) |

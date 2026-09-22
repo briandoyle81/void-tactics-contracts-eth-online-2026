@@ -11,9 +11,21 @@ import "./IShipAttributes.sol";
 contract ShipAttributes is IShipAttributes, Ownable {
     IShips public ships;
 
-    // Attributes version tracking
-    mapping(uint16 => AttributesVersion) public attributesVersions;
-    uint16 public currentAttributesVersion;
+    // Attributes are per-variant and versioned exactly like costs: each
+    // variant has its own counter, and setVariantAttributes publishes a
+    // complete new version (latest + 1) and makes it live in one call.
+    // Published versions are IMMUTABLE — that is what lets a game pin the
+    // version its ships were calculated under (Attributes.version, stored
+    // per ship by Game.calculateShipAttributes) and keep reading that exact
+    // table (getSpecialRangeAt/getSpecialStrengthAt) for its whole lifetime,
+    // no matter what is published or rolled back afterwards.
+    mapping(uint16 variant => mapping(uint16 version => VariantAttributeData))
+        internal _attributesByVariant;
+    // Live pointer: which published version new calculations use. 0 means
+    // the variant has never been configured.
+    mapping(uint16 variant => uint16) internal _currentAttributesVersion;
+    // Highest version ever published for the variant.
+    mapping(uint16 variant => uint16) internal _latestAttributesVersion;
 
     // Cost system — per-variant, keyed by traits.variant. A zero-valued
     // `.version` means the variant has never been configured; reads for an
@@ -21,28 +33,52 @@ contract ShipAttributes is IShipAttributes, Ownable {
     // returning a near-zero cost — same philosophy as VariantAttributeData.
     mapping(uint16 => Costs) public costsByVariant;
 
+    // Required array lengths, enforced at publish time so a malformed table
+    // can never go live and make every ship of a variant revert on lookup.
+    // Equipment arrays are indexed by their enum value, and GenerateNewShip
+    // only rolls a subset of them but customizeShip/DroneYard/prize ships can
+    // equip any enum value — so every slot must exist. Trait-tier arrays are
+    // indexed by traits.accuracy/hull/speed, which are plain uint8 tiers 0-2.
+    uint internal constant TIER_COUNT = 3;
+    uint internal constant GUN_SLOTS = uint(type(MainWeapon).max) + 1;
+    uint internal constant ARMOR_SLOTS = uint(type(Armor).max) + 1;
+    uint internal constant SHIELD_SLOTS = uint(type(Shields).max) + 1;
+    uint internal constant SPECIAL_SLOTS = uint(type(Special).max) + 1;
+    // Ranks 1..RANK_COUNT; RANK_COUNT - 1 thresholds separate them.
+    uint internal constant RANK_COUNT = 6;
+    // Bonus is applied with checked uint8 math in calculateShipAttributes, so
+    // a huge bonus would just make that ship's calculation revert; 100% is
+    // the ceiling on what an owner can publish.
+    uint8 internal constant MAX_RANK_BONUS_PCT = 100;
+    // Floors on a ship's FINAL range and movement. A ship must always be able
+    // to move at least one tile and shoot at least an adjacent target: a
+    // table whose gear penalties sum to <= 0 movement (or an inert gun with
+    // range 0) would otherwise leave a ship that can never move, or can
+    // never shoot. Applied to the computed totals in calculateShipAttributes,
+    // after every bonus, so individual table entries (including negative
+    // movement modifiers and inert range-0 filler guns) stay expressible.
+    uint8 internal constant MIN_RANGE = 1;
+    uint8 internal constant MIN_MOVEMENT = 1;
+
     error InvalidAttributesVersion();
     error ShipNotFound();
     error InvalidCostsVersion();
+    error VariantNotConfigured(uint16 variant);
+    error InvalidArrayLength();
+    error InvalidRankConfig();
 
     event CostsSet(uint16 variant, uint16 version);
-    event CurrentAttributesVersionSet(uint16 version);
-    event AttributesVersionCreated(uint16 version);
-    event VariantAttributesSet(uint16 version, uint16 variant);
+    event CurrentAttributesVersionSet(uint16 variant, uint16 version);
+    event VariantAttributesPublished(uint16 variant, uint16 version);
 
     // No variant is seeded here on purpose — variant 1 and variant 2 are
     // both configured identically via setCosts/setVariantAttributes calls
     // in ignition/modules/DeployAndConfig.ts (setCostsVariant1Call/
     // setVariant1AttributesCall alongside their variant-2 counterparts),
     // not hardcoded here. Every variant, including 1, is unconfigured
-    // (fails loud — see setVariantAttributes's doc comment) until those
-    // calls run.
+    // (fails loud — see VariantNotConfigured) until those calls run.
     constructor(address _ships) Ownable(msg.sender) {
         ships = IShips(_ships);
-
-        // Initialize attributes version 1
-        currentAttributesVersion = 1;
-        attributesVersions[1].version = 1;
     }
 
     function setShipsAddress(address _ships) public onlyOwner {
@@ -55,29 +91,18 @@ contract ShipAttributes is IShipAttributes, Ownable {
     ) public view returns (Attributes memory) {
         if (_ship.id == 0) revert ShipNotFound();
 
-        uint8 rank = getRank(_ship.shipData.shipsDestroyed);
-        uint8 rankMultiplier = 0;
-        if (rank == 1) {
-            rankMultiplier = 0;
-        } else if (rank == 2) {
-            rankMultiplier = 10;
-        } else if (rank == 3) {
-            rankMultiplier = 20;
-        } else if (rank == 4) {
-            rankMultiplier = 30;
-        } else if (rank == 5) {
-            rankMultiplier = 40;
-        } else if (rank >= 6) {
-            rankMultiplier = 50;
-        }
-
-        VariantAttributeData storage variantData = attributesVersions[
-            currentAttributesVersion
-        ].variantData[_ship.traits.variant];
+        VariantAttributeData storage variantData = _currentData(
+            _ship.traits.variant
+        );
+        // rank = 1 + number of thresholds the ship's kills have reached;
+        // the bonus table is indexed by rank - 1.
+        uint8 rankMultiplier = variantData.rankBonusPct[
+            _rankOf(variantData, _ship.shipData.shipsDestroyed) - 1
+        ];
 
         Attributes memory attributes;
         // Calculate base attributes from ship traits and equipment
-        attributes.version = currentAttributesVersion;
+        attributes.version = _currentAttributesVersion[_ship.traits.variant];
         attributes.range = variantData
             .guns[uint8(_ship.equipment.mainWeapon)]
             .range;
@@ -91,6 +116,7 @@ contract ShipAttributes is IShipAttributes, Ownable {
         ];
         calculatedBonus = (uint(attributes.range) * foreAccuracyBonus) / 100;
         attributes.range += uint8(calculatedBonus);
+        if (attributes.range < MIN_RANGE) attributes.range = MIN_RANGE;
         attributes.gunDamage = variantData
             .guns[uint8(_ship.equipment.mainWeapon)]
             .damage;
@@ -106,6 +132,9 @@ contract ShipAttributes is IShipAttributes, Ownable {
         // Increase movement by the rank multiplier as a percentage (avoid overflow)
         calculatedBonus = (uint(attributes.movement) * rankMultiplier) / 100;
         attributes.movement += uint8(calculatedBonus);
+        if (attributes.movement < MIN_MOVEMENT) {
+            attributes.movement = MIN_MOVEMENT;
+        }
         attributes.damageReduction = _calculateDamageReduction(variantData, _ship);
         // Increase damage reduction by the rank multiplier as a percentage (avoid overflow)
         calculatedBonus =
@@ -128,26 +157,13 @@ contract ShipAttributes is IShipAttributes, Ownable {
         return attributes;
     }
 
-    function getRank(uint _shipsDestroyed) public pure returns (uint8) {
-        // Rank 1: 0-9 kills (0% bonus)
-        // Rank 2: 10-29 kills (10% bonus)
-        // Rank 3: 30-99 kills (20% bonus)
-        // Rank 4: 100-299 kills (30% bonus)
-        // Rank 5: 300-999 kills (40% bonus)
-        // Rank 6: 1000+ kills (50% bonus)
-        if (_shipsDestroyed >= 1000) {
-            return 6;
-        } else if (_shipsDestroyed >= 300) {
-            return 5;
-        } else if (_shipsDestroyed >= 100) {
-            return 4;
-        } else if (_shipsDestroyed >= 30) {
-            return 3;
-        } else if (_shipsDestroyed >= 10) {
-            return 2;
-        } else {
-            return 1;
-        }
+    /// @notice Rank (1..6) a ship with `_shipsDestroyed` kills holds under
+    /// the variant's CURRENT attribute version.
+    function getRank(
+        uint16 _variant,
+        uint _shipsDestroyed
+    ) external view returns (uint8) {
+        return _rankOf(_currentData(_variant), _shipsDestroyed);
     }
 
     // Calculate attributes for a ship by ID
@@ -176,6 +192,42 @@ contract ShipAttributes is IShipAttributes, Ownable {
 
     // Internal calculation functions
 
+    // Storage table for the variant's live version. Reverts with a named
+    // error (rather than an array-out-of-bounds panic) if never configured.
+    function _currentData(
+        uint16 _variant
+    ) internal view returns (VariantAttributeData storage) {
+        uint16 version = _currentAttributesVersion[_variant];
+        if (version == 0) revert VariantNotConfigured(_variant);
+        return _attributesByVariant[_variant][version];
+    }
+
+    // Storage table for a specific published version of a variant.
+    function _dataAt(
+        uint16 _variant,
+        uint16 _version
+    ) internal view returns (VariantAttributeData storage) {
+        if (_version == 0 || _version > _latestAttributesVersion[_variant]) {
+            revert InvalidAttributesVersion();
+        }
+        return _attributesByVariant[_variant][_version];
+    }
+
+    // rank = 1 + number of thresholds reached. Thresholds are strictly
+    // ascending (enforced at publish), so the loop can stop at the first
+    // one not reached.
+    function _rankOf(
+        VariantAttributeData storage variantData,
+        uint _shipsDestroyed
+    ) internal view returns (uint8 rank) {
+        uint32[] storage thresholds = variantData.rankThresholds;
+        rank = 1;
+        for (uint i = 0; i < thresholds.length; i++) {
+            if (_shipsDestroyed < thresholds[i]) break;
+            rank++;
+        }
+    }
+
     function _calculateHullPoints(
         VariantAttributeData storage variantData,
         Ship memory _ship
@@ -199,12 +251,32 @@ contract ShipAttributes is IShipAttributes, Ownable {
         int8 gunMovement = variantData
             .guns[uint8(_ship.equipment.mainWeapon)]
             .movement;
-        int8 armorMovement = variantData
-            .armors[uint8(_ship.equipment.armor)]
-            .movement;
-        int8 shieldMovement = variantData
-            .shields[uint8(_ship.equipment.shields)]
-            .movement;
+        // Defensive gear's movement: a piece only counts when it is actually
+        // equipped. The tables' "None" entries (index 0) are the bonus for
+        // carrying no defensive gear, and it must be counted ONCE — a ship
+        // carries armor OR shields, so one of the two slots is always None, and
+        // summing both tables' None entries would hand every ship a free bonus
+        // (and a bare ship a doubled one). Only when the ship carries neither
+        // does the None bonus apply, taken from the armor table (the shields
+        // table's None movement is never read).
+        int8 armorMovement;
+        int8 shieldMovement;
+        if (_ship.equipment.armor != Armor.None) {
+            armorMovement = variantData
+                .armors[uint8(_ship.equipment.armor)]
+                .movement;
+        }
+        if (_ship.equipment.shields != Shields.None) {
+            shieldMovement = variantData
+                .shields[uint8(_ship.equipment.shields)]
+                .movement;
+        }
+        if (
+            _ship.equipment.armor == Armor.None &&
+            _ship.equipment.shields == Shields.None
+        ) {
+            armorMovement = variantData.armors[0].movement;
+        }
         int8 specialMovement = variantData
             .specials[uint8(_ship.equipment.special)]
             .movement;
@@ -234,28 +306,45 @@ contract ShipAttributes is IShipAttributes, Ownable {
         return damageReduction;
     }
 
-    // Get special range from attributes version
+    // The getters below read the variant's LIVE (current) version — for
+    // display and tooling. In-game logic must NOT use them: a game pins the
+    // attributes version of its ships (Attributes.version) and reads specials
+    // through getSpecialRangeAt/getSpecialStrengthAt so a later publish or
+    // rollback can't change an in-flight game.
+
+    // Get special range from the current attributes version
     function getSpecialRange(
         Special _special,
         uint16 _variant
     ) public view returns (uint8) {
-        return
-            attributesVersions[currentAttributesVersion]
-                .variantData[_variant]
-                .specials[uint8(_special)]
-                .range;
+        return _currentData(_variant).specials[uint8(_special)].range;
     }
 
-    // Get special strength from attributes version
+    // Get special strength from the current attributes version
     function getSpecialStrength(
         Special _special,
         uint16 _variant
     ) public view returns (uint8) {
-        return
-            attributesVersions[currentAttributesVersion]
-                .variantData[_variant]
-                .specials[uint8(_special)]
-                .strength;
+        return _currentData(_variant).specials[uint8(_special)].strength;
+    }
+
+    // Get special range from a specific published version (the one a game
+    // pinned in its ship's Attributes.version).
+    function getSpecialRangeAt(
+        uint16 _variant,
+        uint16 _version,
+        Special _special
+    ) external view returns (uint8) {
+        return _dataAt(_variant, _version).specials[uint8(_special)].range;
+    }
+
+    // Get special strength from a specific published version.
+    function getSpecialStrengthAt(
+        uint16 _variant,
+        uint16 _version,
+        Special _special
+    ) external view returns (uint8) {
+        return _dataAt(_variant, _version).specials[uint8(_special)].strength;
     }
 
     // Get gun data for a variant from the current attributes version
@@ -263,10 +352,7 @@ contract ShipAttributes is IShipAttributes, Ownable {
         MainWeapon _weapon,
         uint16 _variant
     ) public view returns (GunData memory) {
-        return
-            attributesVersions[currentAttributesVersion]
-                .variantData[_variant]
-                .guns[uint8(_weapon)];
+        return _currentData(_variant).guns[uint8(_weapon)];
     }
 
     // Get armor data for a variant from the current attributes version
@@ -274,10 +360,7 @@ contract ShipAttributes is IShipAttributes, Ownable {
         Armor _armor,
         uint16 _variant
     ) public view returns (ArmorData memory) {
-        return
-            attributesVersions[currentAttributesVersion]
-                .variantData[_variant]
-                .armors[uint8(_armor)];
+        return _currentData(_variant).armors[uint8(_armor)];
     }
 
     // Get shield data for a variant from the current attributes version
@@ -285,21 +368,15 @@ contract ShipAttributes is IShipAttributes, Ownable {
         Shields _shields,
         uint16 _variant
     ) public view returns (ShieldData memory) {
-        return
-            attributesVersions[currentAttributesVersion]
-                .variantData[_variant]
-                .shields[uint8(_shields)];
+        return _currentData(_variant).shields[uint8(_shields)];
     }
 
-    // Get special data from attributes version
+    // Get special data from the current attributes version
     function getSpecialData(
         Special _special,
         uint16 _variant
     ) public view returns (SpecialData memory) {
-        return
-            attributesVersions[currentAttributesVersion]
-                .variantData[_variant]
-                .specials[uint8(_special)];
+        return _currentData(_variant).specials[uint8(_special)];
     }
 
     // Cost calculation functions
@@ -309,16 +386,16 @@ contract ShipAttributes is IShipAttributes, Ownable {
         Costs storage costs = costsByVariant[ship.traits.variant];
         if (costs.version == 0) revert InvalidCostsVersion();
 
-        uint16 unadjustedCost = uint16(
-            costs.baseCost +
-                costs.accuracy[uint8(ship.traits.accuracy)] +
-                costs.hull[uint8(ship.traits.hull)] +
-                costs.speed[uint8(ship.traits.speed)] +
-                costs.mainWeapon[uint8(ship.equipment.mainWeapon)] +
-                costs.armor[uint8(ship.equipment.armor)] +
-                costs.shields[uint8(ship.equipment.shields)] +
-                costs.special[uint8(ship.equipment.special)]
-        );
+        // Widened to uint16 up front: summing the uint8 table entries in
+        // uint8 arithmetic would revert for any ship totalling more than 255.
+        uint16 unadjustedCost = uint16(costs.baseCost) +
+            costs.accuracy[uint8(ship.traits.accuracy)] +
+            costs.hull[uint8(ship.traits.hull)] +
+            costs.speed[uint8(ship.traits.speed)] +
+            costs.mainWeapon[uint8(ship.equipment.mainWeapon)] +
+            costs.armor[uint8(ship.equipment.armor)] +
+            costs.shields[uint8(ship.equipment.shields)] +
+            costs.special[uint8(ship.equipment.special)];
 
         // TODO: Add rank-based discounts here if needed
         // For now, return unadjusted cost
@@ -329,6 +406,16 @@ contract ShipAttributes is IShipAttributes, Ownable {
         uint16 _variant,
         Costs memory _costs
     ) external onlyOwner {
+        if (
+            _costs.accuracy.length != TIER_COUNT ||
+            _costs.hull.length != TIER_COUNT ||
+            _costs.speed.length != TIER_COUNT ||
+            _costs.mainWeapon.length != GUN_SLOTS ||
+            _costs.armor.length != ARMOR_SLOTS ||
+            _costs.shields.length != SHIELD_SLOTS ||
+            _costs.special.length != SPECIAL_SLOTS
+        ) revert InvalidArrayLength();
+
         // Compute the new version from current storage before it's overwritten below,
         // and ignore whatever `_costs.version` the caller passed in — otherwise a
         // stale/zero/duplicate caller-supplied version would silently corrupt the
@@ -352,107 +439,151 @@ contract ShipAttributes is IShipAttributes, Ownable {
     }
 
     // Attributes version management functions
-    function setCurrentAttributesVersion(uint16 _version) external onlyOwner {
-        currentAttributesVersion = _version;
-        emit CurrentAttributesVersionSet(_version);
-    }
 
-    function getCurrentAttributesVersion() external view returns (uint16) {
-        return currentAttributesVersion;
-    }
-
-    function getAttributesVersionBase(
-        uint16 _version,
+    /// @notice Live attributes version for a variant (0 = never configured).
+    function getCurrentAttributesVersion(
         uint16 _variant
-    ) external view returns (uint16 version, uint8 baseHull, uint8 baseSpeed) {
-        AttributesVersion storage versionData = attributesVersions[_version];
-        VariantAttributeData storage variantData = versionData.variantData[
-            _variant
-        ];
-        return (
-            versionData.version,
-            variantData.baseHull,
-            variantData.baseSpeed
-        );
+    ) external view returns (uint16) {
+        return _currentAttributesVersion[_variant];
+    }
+
+    /// @notice Highest attributes version ever published for a variant.
+    function getLatestAttributesVersion(
+        uint16 _variant
+    ) external view returns (uint16) {
+        return _latestAttributesVersion[_variant];
     }
 
     /**
-     * @dev Start a new attributes version and increment the version counter.
-     * Every per-variant stat (baseHull/baseSpeed/guns/armors/shields/
-     * foreAccuracy/hull/engineSpeeds/specials) lives on VariantAttributeData
-     * now, so a new version starts completely empty — it must be configured
-     * separately via setVariantAttributes for each variant before ships
-     * using this version can be calculated.
+     * @dev Point a variant's live attributes at any version already
+     * published for it — the rollback / roll-forward lever. Games already
+     * underway are unaffected (they pin their own version); this only
+     * changes what NEW calculations use.
      */
-    function startNewAttributesVersion()
-        external
-        onlyOwner
-        returns (uint16 newVersion)
-    {
-        currentAttributesVersion++;
-        newVersion = currentAttributesVersion;
-        attributesVersions[newVersion].version = newVersion;
-        emit AttributesVersionCreated(newVersion);
+    function setCurrentAttributesVersion(
+        uint16 _variant,
+        uint16 _version
+    ) external onlyOwner {
+        if (_version == 0 || _version > _latestAttributesVersion[_variant]) {
+            revert InvalidAttributesVersion();
+        }
+        _currentAttributesVersion[_variant] = _version;
+        emit CurrentAttributesVersionSet(_variant, _version);
     }
 
     /**
-     * @dev Fully configure a variant (faction) under a given attributes
-     * version: base hull/speed, per-tier bonuses, weapon/armor/shield
-     * stats, and equipped-Special data. Must be called for a variant before
-     * any ship with that traits.variant can have its attributes or cost
-     * calculated under this version — lookups for an unconfigured variant
-     * revert (fail loud) rather than silently falling back to a default.
+     * @notice Full published table for a variant at `_version` (0 = the
+     * variant's current version). Includes every array — foreAccuracy, hull,
+     * engineSpeeds, rank rules — that the per-item getters don't expose, so
+     * tooling can read, diff, or copy a variant.
+     */
+    function getVariantAttributes(
+        uint16 _variant,
+        uint16 _version
+    ) external view returns (VariantAttributeData memory) {
+        uint16 version = _version == 0
+            ? _currentAttributesVersion[_variant]
+            : _version;
+        if (version == 0) revert VariantNotConfigured(_variant);
+        return _dataAt(_variant, version);
+    }
+
+    /**
+     * @dev Publish a complete new attributes version for one variant
+     * (faction) and make it live, in one call: base hull/speed, per-tier
+     * bonuses, weapon/armor/shield stats, equipped-Special data, and rank
+     * rules. The version is always the variant's latest + 1 — callers don't
+     * choose it (same as setCosts). Published versions are never modified;
+     * to change anything, publish again. Other variants are untouched, and
+     * there is no half-configured state: the new version only becomes
+     * current once every array has been written and validated.
+     *
+     * A variant must be published before any ship with that traits.variant
+     * can have its attributes or cost calculated — lookups for an
+     * unconfigured variant revert VariantNotConfigured (fail loud) rather
+     * than silently falling back to a default. Publish ShipAttributes for a
+     * variant BEFORE raising Ships.maxVariant to admit it.
      * @param params See SetVariantAttributesParams.
      */
     function setVariantAttributes(
         SetVariantAttributesParams memory params
     ) external onlyOwner {
-        if (params.version == 0 || params.version > currentAttributesVersion) {
-            revert InvalidAttributesVersion();
-        }
+        _validateAttributes(params);
 
-        VariantAttributeData storage variantData = attributesVersions[
-            params.version
-        ].variantData[params.variant];
+        uint16 newVersion = _latestAttributesVersion[params.variant] + 1;
+
+        // Freshly-published slot, so every array starts empty — no delete
+        // needed before pushing.
+        VariantAttributeData storage variantData = _attributesByVariant[
+            params.variant
+        ][newVersion];
 
         variantData.baseHull = params.baseHull;
         variantData.baseSpeed = params.baseSpeed;
 
-        delete variantData.foreAccuracy;
         for (uint i = 0; i < params.foreAccuracy.length; i++) {
             variantData.foreAccuracy.push(params.foreAccuracy[i]);
         }
-
-        delete variantData.hull;
         for (uint i = 0; i < params.hull.length; i++) {
             variantData.hull.push(params.hull[i]);
         }
-
-        delete variantData.engineSpeeds;
         for (uint i = 0; i < params.engineSpeeds.length; i++) {
             variantData.engineSpeeds.push(params.engineSpeeds[i]);
         }
-
-        delete variantData.guns;
         for (uint i = 0; i < params.guns.length; i++) {
             variantData.guns.push(params.guns[i]);
         }
-
-        delete variantData.armors;
         for (uint i = 0; i < params.armors.length; i++) {
             variantData.armors.push(params.armors[i]);
         }
-
-        delete variantData.shields;
         for (uint i = 0; i < params.shields.length; i++) {
             variantData.shields.push(params.shields[i]);
         }
-
-        delete variantData.specials;
         for (uint i = 0; i < params.specials.length; i++) {
             variantData.specials.push(params.specials[i]);
         }
+        for (uint i = 0; i < params.rankThresholds.length; i++) {
+            variantData.rankThresholds.push(params.rankThresholds[i]);
+        }
+        for (uint i = 0; i < params.rankBonusPct.length; i++) {
+            variantData.rankBonusPct.push(params.rankBonusPct[i]);
+        }
 
-        emit VariantAttributesSet(params.version, params.variant);
+        _latestAttributesVersion[params.variant] = newVersion;
+        _currentAttributesVersion[params.variant] = newVersion;
+        emit VariantAttributesPublished(params.variant, newVersion);
+    }
+
+    // Reject a malformed table before it can go live (M-04): wrong-length
+    // arrays would panic out-of-bounds on lookup for every ship of the
+    // variant, and mis-ordered rank thresholds would make ranks meaningless.
+    function _validateAttributes(
+        SetVariantAttributesParams memory params
+    ) internal pure {
+        if (
+            params.foreAccuracy.length != TIER_COUNT ||
+            params.hull.length != TIER_COUNT ||
+            params.engineSpeeds.length != TIER_COUNT ||
+            params.guns.length != GUN_SLOTS ||
+            params.armors.length != ARMOR_SLOTS ||
+            params.shields.length != SHIELD_SLOTS ||
+            params.specials.length != SPECIAL_SLOTS ||
+            params.rankThresholds.length != RANK_COUNT - 1 ||
+            params.rankBonusPct.length != RANK_COUNT
+        ) revert InvalidArrayLength();
+
+        // Strictly ascending and > 0, so rank 1 is always reachable at 0 kills
+        // and every rank has a distinct kill requirement.
+        if (params.rankThresholds[0] == 0) revert InvalidRankConfig();
+        for (uint i = 1; i < params.rankThresholds.length; i++) {
+            if (params.rankThresholds[i] <= params.rankThresholds[i - 1]) {
+                revert InvalidRankConfig();
+            }
+        }
+        for (uint i = 0; i < params.rankBonusPct.length; i++) {
+            if (params.rankBonusPct[i] > MAX_RANK_BONUS_PCT) {
+                revert InvalidRankConfig();
+            }
+        }
     }
 }

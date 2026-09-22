@@ -4,6 +4,7 @@ import hre from "hardhat";
 import { parseEther, zeroAddress } from "viem";
 import DeployModule from "../ignition/modules/DeployAndConfig";
 import { deployShipsFixture } from "./fixtures/deployShipsFixture";
+import { attributeParams, costsParams } from "./fixtures/attributeTables";
 import { ShipTuple, tupleToShip } from "./types";
 
 /** Same Ignition module as Ships tests; builds lobby + constructed free ships for fleet rules. */
@@ -66,7 +67,7 @@ async function deployLobbyFleetFixture() {
 }
 
 function sampleCostsV2() {
-  return {
+  return costsParams({
     version: 2,
     baseCost: 60,
     accuracy: [0, 15, 30],
@@ -79,7 +80,7 @@ function sampleCostsV2() {
     // must cover the full range, since GenerateNewShip rolls across all 8
     // slots now, not just the first 4.
     special: [0, 12, 24, 18, 18, 24, 12, 0],
-  };
+  });
 }
 
 // Default gun/armor/shield data — matches ShipAttributes' constructor
@@ -149,14 +150,80 @@ function sampleSetAllAttributesArgs() {
   };
 }
 
+// A full variant table (short-form arrays are padded to 8 slots by
+// attributeParams). Its Slot1 special (range 5, strength 99) is deliberately
+// unlike either faction's deployed Slot1, so tests can tell a publish apart
+// from the deployed defaults; tests that need other specials override
+// `specials`.
+function baselineAttributes(
+  variant: number,
+  overrides: Record<string, unknown> = {},
+) {
+  return attributeParams({
+    variant,
+    baseHull: 100,
+    baseSpeed: 3,
+    foreAccuracy: [0, 25, 50],
+    hull: [0, 10, 20],
+    engineSpeeds: [0, 1, 2],
+    ...defaultGunsArmorsShields(),
+    specials: [
+      { range: 0, strength: 0, movement: 0 },
+      { range: 5, strength: 99, movement: 0 },
+      { range: 3, strength: 40, movement: 0 },
+      { range: 3, strength: 30, movement: 0 },
+    ],
+    ...overrides,
+  });
+}
+
+// A plain constructed ship literal for calculateShipAttributes/Cost reads.
+function makeShip(
+  variant: number,
+  shipsDestroyed = 0,
+  equipment = { mainWeapon: 0, armor: 0, shields: 0, special: 0 },
+) {
+  return {
+    name: "",
+    id: 1n,
+    equipment,
+    traits: {
+      serialNumber: 1n,
+      colors: { h1: 0, s1: 0, l1: 0, h2: 0, s2: 0, l2: 0, h3: 0, s3: 0, l3: 0 },
+      variant,
+      accuracy: 0,
+      hull: 0,
+      speed: 0,
+    },
+    shipData: {
+      shipsDestroyed,
+      costsVersion: 0,
+      cost: 0,
+      modified: 0,
+      shiny: false,
+      constructed: true,
+      inFleet: false,
+      isFreeShip: false,
+      timestampDestroyed: 0n,
+    },
+    owner: zeroAddress,
+  };
+}
+
 describe("Ship costs, versions, and fleets", function () {
-  describe("ShipAttributes — current version pointer", function () {
-    it("lets owner setCurrentAttributesVersion back to a prior version", async function () {
+  describe("ShipAttributes — per-variant attributes versions", function () {
+    it("publishes a new version for one variant without touching another variant", async function () {
       const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
 
-      expect(
-        await shipAttributes.read.getCurrentAttributesVersion(),
-      ).to.equal(1);
+      // The deploy module publishes version 1 for each variant.
+      for (const variant of [1, 2]) {
+        expect(
+          await shipAttributes.read.getCurrentAttributesVersion([variant]),
+        ).to.equal(1);
+        expect(
+          await shipAttributes.read.getLatestAttributesVersion([variant]),
+        ).to.equal(1);
+      }
 
       const {
         newGuns,
@@ -168,18 +235,10 @@ describe("Ship costs, versions, and fleets", function () {
         newHull,
       } = sampleSetAllAttributesArgs();
 
-      await shipAttributes.write.startNewAttributesVersion({
-        account: owner.account,
-      });
-
-      expect(
-        await shipAttributes.read.getCurrentAttributesVersion(),
-      ).to.equal(2);
-
+      // One call publishes v2 for variant 1 and makes it live.
       await shipAttributes.write.setVariantAttributes(
         [
-          {
-            version: 2,
+          attributeParams({
             variant: 1,
             baseHull: 120,
             baseSpeed: 4,
@@ -190,26 +249,431 @@ describe("Ship costs, versions, and fleets", function () {
             armors: newArmors,
             shields: newShields,
             specials: newSpecials,
-          },
+          }),
         ],
         { account: owner.account },
       );
 
-      await shipAttributes.write.setCurrentAttributesVersion([1n], {
+      expect(
+        await shipAttributes.read.getCurrentAttributesVersion([1]),
+      ).to.equal(2);
+      expect(
+        await shipAttributes.read.getLatestAttributesVersion([1]),
+      ).to.equal(2);
+      expect((await shipAttributes.read.getVariantAttributes([1, 2])).baseHull).to.equal(120);
+
+      // Variant 2 is completely untouched.
+      expect(
+        await shipAttributes.read.getCurrentAttributesVersion([2]),
+      ).to.equal(1);
+      expect(
+        await shipAttributes.read.getLatestAttributesVersion([2]),
+      ).to.equal(1);
+      // Still variant 2's own deployed table (base hull 125 — the heavy
+      // faction), not variant 1's, and not the value just published for
+      // variant 1.
+      expect((await shipAttributes.read.getVariantAttributes([2, 0])).baseHull).to.equal(125);
+    });
+
+    it("lets owner roll a variant back and forward; older versions stay readable and immutable", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+
+      await shipAttributes.write.setVariantAttributes(
+        [baselineAttributes(1, { baseHull: 120 })],
+        { account: owner.account },
+      );
+      expect(
+        await shipAttributes.read.getCurrentAttributesVersion([1]),
+      ).to.equal(2);
+
+      // Roll back to v1: new calculations use v1's numbers again.
+      await shipAttributes.write.setCurrentAttributesVersion([1, 1], {
         account: owner.account,
       });
-
       expect(
-        await shipAttributes.read.getCurrentAttributesVersion(),
+        await shipAttributes.read.getCurrentAttributesVersion([1]),
+      ).to.equal(1);
+      // latest is unaffected by a rollback.
+      expect(
+        await shipAttributes.read.getLatestAttributesVersion([1]),
+      ).to.equal(2);
+      const attrsRolledBack = await shipAttributes.read.calculateShipAttributes(
+        [makeShip(1)],
+      );
+      expect(attrsRolledBack.version).to.equal(1);
+      expect(attrsRolledBack.hullPoints).to.equal(100);
+
+      // Both versions remain readable, exactly as published.
+      expect((await shipAttributes.read.getVariantAttributes([1, 1])).baseHull).to.equal(100);
+      expect((await shipAttributes.read.getVariantAttributes([1, 2])).baseHull).to.equal(120);
+      // version 0 means "current".
+      expect((await shipAttributes.read.getVariantAttributes([1, 0])).baseHull).to.equal(100);
+
+      // Roll forward again.
+      await shipAttributes.write.setCurrentAttributesVersion([1, 2], {
+        account: owner.account,
+      });
+      const attrsForward = await shipAttributes.read.calculateShipAttributes([
+        makeShip(1),
+      ]);
+      expect(attrsForward.version).to.equal(2);
+      expect(attrsForward.hullPoints).to.equal(120);
+    });
+
+    it("rejects rolling a variant to version 0 or beyond its latest published version", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+
+      await expect(
+        shipAttributes.write.setCurrentAttributesVersion([1, 0], {
+          account: owner.account,
+        }),
+      ).to.be.rejectedWith("InvalidAttributesVersion");
+      await expect(
+        shipAttributes.write.setCurrentAttributesVersion([1, 2], {
+          account: owner.account,
+        }),
+      ).to.be.rejectedWith("InvalidAttributesVersion");
+      // A never-configured variant has nothing to roll to.
+      await expect(
+        shipAttributes.write.setCurrentAttributesVersion([99, 1], {
+          account: owner.account,
+        }),
+      ).to.be.rejectedWith("InvalidAttributesVersion");
+    });
+
+    it("exposes every array, including tier arrays and rank rules, via getVariantAttributes", async function () {
+      const { shipAttributes } = await loadFixture(deployShipsFixture);
+
+      const data = await shipAttributes.read.getVariantAttributes([1, 0]);
+      expect(data.baseHull).to.equal(100);
+      expect(data.baseSpeed).to.equal(4);
+      expect([...data.foreAccuracy]).to.deep.equal([0, 25, 50]);
+      expect([...data.hull]).to.deep.equal([0, 10, 20]);
+      expect([...data.engineSpeeds]).to.deep.equal([0, 1, 2]);
+      expect(data.guns.length).to.equal(8);
+      expect(data.armors.length).to.equal(8);
+      expect(data.shields.length).to.equal(8);
+      expect(data.specials.length).to.equal(8);
+      expect([...data.rankThresholds]).to.deep.equal([10, 30, 100, 300, 1000]);
+      expect([...data.rankBonusPct]).to.deep.equal([0, 10, 20, 30, 40, 50]);
+    });
+
+    it("reverts VariantNotConfigured (not an opaque panic) for an unconfigured variant", async function () {
+      const { shipAttributes } = await loadFixture(deployShipsFixture);
+
+      await expect(
+        shipAttributes.read.calculateShipAttributes([makeShip(99)]),
+      ).to.be.rejectedWith("VariantNotConfigured");
+      await expect(
+        shipAttributes.read.getSpecialRange([1, 99]),
+      ).to.be.rejectedWith("VariantNotConfigured");
+      await expect(
+        shipAttributes.read.getGunData([0, 99]),
+      ).to.be.rejectedWith("VariantNotConfigured");
+      await expect(
+        shipAttributes.read.getVariantAttributes([99, 0]),
+      ).to.be.rejectedWith("VariantNotConfigured");
+      await expect(
+        shipAttributes.read.getRank([99, 5n]),
+      ).to.be.rejectedWith("VariantNotConfigured");
+    });
+
+    it("rejects wrong-length tables on publish (setVariantAttributes and setCosts)", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+      const good = baselineAttributes(1);
+
+      const bad: Record<string, unknown>[] = [
+        { guns: good.guns.slice(0, 4) },
+        { armors: good.armors.slice(0, 4) },
+        { shields: good.shields.slice(0, 4) },
+        { specials: good.specials.slice(0, 4) },
+        { foreAccuracy: [0, 25] },
+        { hull: [0, 10, 20, 30] },
+        { engineSpeeds: [0] },
+        { rankThresholds: [10, 30, 100, 300] },
+        { rankBonusPct: [0, 10, 20, 30, 40] },
+      ];
+      for (const override of bad) {
+        await expect(
+          shipAttributes.write.setVariantAttributes(
+            [{ ...good, ...override }],
+            { account: owner.account },
+          ),
+          JSON.stringify(Object.keys(override)),
+        ).to.be.rejectedWith("InvalidArrayLength");
+      }
+      // Nothing was published by any rejected call.
+      expect(
+        await shipAttributes.read.getLatestAttributesVersion([1]),
       ).to.equal(1);
 
-      const v1 = await shipAttributes.read.getAttributesVersionBase([1n, 1]);
-      expect(v1[0]).to.equal(1);
-      expect(v1[1]).to.equal(100);
+      const goodCosts = sampleCostsV2();
+      const badCosts: Record<string, unknown>[] = [
+        { accuracy: [0, 15] },
+        { hull: [0, 15, 30, 45] },
+        { speed: [0] },
+        { mainWeapon: [30, 35, 45, 45] },
+        { armor: [0, 8, 12, 18] },
+        { shields: [0, 12, 24, 36] },
+        { special: [0, 12, 24, 18] },
+      ];
+      for (const override of badCosts) {
+        await expect(
+          shipAttributes.write.setCosts([1, { ...goodCosts, ...override }], {
+            account: owner.account,
+          }),
+          JSON.stringify(Object.keys(override)),
+        ).to.be.rejectedWith("InvalidArrayLength");
+      }
+      // The cost version didn't move either.
+      expect(
+        await shipAttributes.read.getCurrentCostsVersion([1]),
+      ).to.equal(1);
+    });
 
-      const v2 = await shipAttributes.read.getAttributesVersionBase([2n, 1]);
-      expect(v2[0]).to.equal(2);
-      expect(v2[1]).to.equal(120);
+    it("rejects invalid rank rules on publish", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+
+      const invalidRankConfigs: Record<string, unknown>[] = [
+        // first threshold must be > 0
+        { rankThresholds: [0, 30, 100, 300, 1000] },
+        // must be strictly ascending
+        { rankThresholds: [10, 30, 30, 300, 1000] },
+        { rankThresholds: [10, 30, 100, 90, 1000] },
+        // bonus capped at 100%
+        { rankBonusPct: [0, 10, 20, 30, 40, 101] },
+      ];
+      for (const override of invalidRankConfigs) {
+        await expect(
+          shipAttributes.write.setVariantAttributes(
+            [baselineAttributes(1, override)],
+            { account: owner.account },
+          ),
+          JSON.stringify(override),
+        ).to.be.rejectedWith("InvalidRankConfig");
+      }
+    });
+
+    it("reports rank from the variant's configured thresholds", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+
+      // Today's thresholds: 10 / 30 / 100 / 300 / 1000.
+      const expected: [bigint, number][] = [
+        [0n, 1],
+        [9n, 1],
+        [10n, 2],
+        [29n, 2],
+        [30n, 3],
+        [99n, 3],
+        [100n, 4],
+        [299n, 4],
+        [300n, 5],
+        [999n, 5],
+        [1000n, 6],
+        [1000000n, 6],
+      ];
+      for (const [kills, rank] of expected) {
+        expect(await shipAttributes.read.getRank([1, kills])).to.equal(rank);
+      }
+
+      // Retune variant 1 only.
+      await shipAttributes.write.setVariantAttributes(
+        [baselineAttributes(1, { rankThresholds: [1, 2, 3, 4, 5] })],
+        { account: owner.account },
+      );
+      expect(await shipAttributes.read.getRank([1, 0n])).to.equal(1);
+      expect(await shipAttributes.read.getRank([1, 1n])).to.equal(2);
+      expect(await shipAttributes.read.getRank([1, 5n])).to.equal(6);
+      // Variant 2 still uses its own (unchanged) thresholds.
+      expect(await shipAttributes.read.getRank([2, 5n])).to.equal(1);
+    });
+
+    it("applies the configured rank bonus to computed stats", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+
+      // Today's rules: rank 2 (10 kills) is +10% — baseHull 100 -> 110.
+      expect(
+        (await shipAttributes.read.calculateShipAttributes([makeShip(1, 0)]))
+          .hullPoints,
+      ).to.equal(100);
+      expect(
+        (await shipAttributes.read.calculateShipAttributes([makeShip(1, 10)]))
+          .hullPoints,
+      ).to.equal(110);
+
+      // Retune: rank 2 at a single kill for +100%; rank 1 stays +0%.
+      await shipAttributes.write.setVariantAttributes(
+        [
+          baselineAttributes(1, {
+            rankThresholds: [1, 30, 100, 300, 1000],
+            rankBonusPct: [0, 100, 100, 100, 100, 100],
+          }),
+        ],
+        { account: owner.account },
+      );
+      expect(
+        (await shipAttributes.read.calculateShipAttributes([makeShip(1, 0)]))
+          .hullPoints,
+      ).to.equal(100);
+      expect(
+        (await shipAttributes.read.calculateShipAttributes([makeShip(1, 1)]))
+          .hullPoints,
+      ).to.equal(200);
+    });
+
+    it("floors a ship's final range and movement at 1", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+
+      // Movement modifiers that sum below zero (base 0, gun -1, armor -2,
+      // shields -2) and an inert range-0 gun: without floors this ship could
+      // neither move nor shoot.
+      await shipAttributes.write.setVariantAttributes(
+        [
+          baselineAttributes(1, {
+            baseSpeed: 0,
+            engineSpeeds: [0, 0, 0],
+            guns: [{ range: 0, damage: 10, movement: -1 }],
+            armors: [{ damageReduction: 0, movement: -2 }],
+            shields: [{ damageReduction: 0, movement: -2 }],
+          }),
+        ],
+        { account: owner.account },
+      );
+
+      const attrs = await shipAttributes.read.calculateShipAttributes([
+        makeShip(1),
+      ]);
+      expect(attrs.movement).to.equal(1);
+      expect(attrs.range).to.equal(1);
+
+      // Bonuses scale the true (zero) base, so a top-rank ship isn't inflated
+      // past the floor either.
+      const topRank = await shipAttributes.read.calculateShipAttributes([
+        makeShip(1, 1000),
+      ]);
+      expect(topRank.movement).to.equal(1);
+      expect(topRank.range).to.equal(1);
+    });
+
+    it("leaves range and movement untouched when they are already at or above 1", async function () {
+      const { shipAttributes } = await loadFixture(deployShipsFixture);
+
+      // Variant 1's deployed defaults: Laser range 3; movement = base speed 4
+      // + the None bonus once (+1, a bare ship; tier-0 engine, Laser 0) = 5.
+      // The floors change nothing.
+      const attrs = await shipAttributes.read.calculateShipAttributes([
+        makeShip(1),
+      ]);
+      expect(attrs.range).to.equal(3);
+      expect(attrs.movement).to.equal(5);
+    });
+
+    it("counts the None (no defensive gear) movement bonus once, not once per slot", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+
+      // base speed 3, tier-0 engine, Generic gun 0. Armor: None +1, Light 0,
+      // Heavy -2. Shields: None +5 (a deliberately absurd value that must
+      // never be read), Light +1.
+      await shipAttributes.write.setVariantAttributes(
+        [
+          baselineAttributes(1, {
+            baseSpeed: 3,
+            engineSpeeds: [0, 0, 0],
+            guns: [{ range: 3, damage: 50, movement: 0 }],
+            armors: [
+              { damageReduction: 0, movement: 1 },
+              { damageReduction: 15, movement: 0 },
+              { damageReduction: 30, movement: -1 },
+              { damageReduction: 45, movement: -2 },
+            ],
+            shields: [
+              { damageReduction: 0, movement: 5 },
+              { damageReduction: 15, movement: 1 },
+            ],
+          }),
+        ],
+        { account: owner.account },
+      );
+
+      const move = async (armor: number, shields: number) =>
+        (
+          await shipAttributes.read.calculateShipAttributes([
+            makeShip(1, 0, { mainWeapon: 0, armor, shields, special: 0 }),
+          ])
+        ).movement;
+
+      // No defensive gear: the None bonus applies once (armor table's +1);
+      // the shields table's None entry is never read.
+      expect(await move(0, 0)).to.equal(4);
+      // Armor only: just the armor's own movement — no None bonus from the
+      // unused shields slot.
+      expect(await move(1, 0)).to.equal(3); // Light armor: 3 + 0
+      expect(await move(3, 0)).to.equal(1); // Heavy armor: 3 - 2
+      // Shields only: just the shields' own movement — no None bonus from the
+      // unused armor slot.
+      expect(await move(0, 1)).to.equal(4); // Light shields: 3 + 1
+    });
+
+    it("reads special data at a specific published version, independent of the live one", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+
+      // Variant 2's Slot1 is ElectricStorm in the deploy module
+      // (v1: range 2, strength 1).
+      await shipAttributes.write.setVariantAttributes(
+        [baselineAttributes(2)], // v2: Slot1 range 5, strength 99
+        { account: owner.account },
+      );
+
+      // Live getters follow the current version...
+      expect(await shipAttributes.read.getSpecialStrength([1, 2])).to.equal(99);
+      // ...while pinned reads return exactly what each version published.
+      expect(await shipAttributes.read.getSpecialStrengthAt([2, 1, 1])).to.equal(1);
+      expect(await shipAttributes.read.getSpecialRangeAt([2, 1, 1])).to.equal(2);
+      expect(await shipAttributes.read.getSpecialStrengthAt([2, 2, 1])).to.equal(99);
+      expect(await shipAttributes.read.getSpecialRangeAt([2, 2, 1])).to.equal(5);
+
+      // Rolling the live pointer back doesn't change what v2 says.
+      await shipAttributes.write.setCurrentAttributesVersion([2, 1], {
+        account: owner.account,
+      });
+      expect(await shipAttributes.read.getSpecialStrength([1, 2])).to.equal(1);
+      expect(await shipAttributes.read.getSpecialStrengthAt([2, 2, 1])).to.equal(99);
+
+      // Version 0 and unpublished versions are rejected.
+      await expect(
+        shipAttributes.read.getSpecialRangeAt([2, 0, 1]),
+      ).to.be.rejectedWith("InvalidAttributesVersion");
+      await expect(
+        shipAttributes.read.getSpecialRangeAt([2, 3, 1]),
+      ).to.be.rejectedWith("InvalidAttributesVersion");
+    });
+
+    it("prices ships totalling more than 255 instead of overflowing", async function () {
+      const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
+
+      // Every cost entry is a uint8, and the sum used to be computed in uint8
+      // arithmetic, so any ship totalling over 255 reverted.
+      await shipAttributes.write.setCosts(
+        [
+          1,
+          costsParams({
+            version: 0,
+            baseCost: 200,
+            accuracy: [0, 0, 0],
+            hull: [0, 0, 0],
+            speed: [0, 0, 0],
+            mainWeapon: [60, 0, 0, 0],
+            armor: [10, 0, 0, 0],
+            shields: [0, 0, 0, 0],
+            special: [0, 0, 0, 0, 0, 0, 0, 0],
+          }),
+        ],
+        { account: owner.account },
+      );
+
+      expect(await shipAttributes.read.calculateShipCost([makeShip(1)])).to.equal(
+        270,
+      );
     });
   });
 
@@ -222,8 +686,7 @@ describe("Ship costs, versions, and fleets", function () {
       // stronger/longer-range EMP than the constructor's variant 1 baseline
       await shipAttributes.write.setVariantAttributes(
         [
-          {
-            version: 1,
+          attributeParams({
             variant: 2,
             baseHull: 100,
             baseSpeed: 3,
@@ -253,7 +716,7 @@ describe("Ship costs, versions, and fleets", function () {
               { range: 0, strength: 0, movement: 0 },
               { range: 0, strength: 0, movement: 0 },
             ],
-          },
+          }),
         ],
         { account: owner.account },
       );
@@ -327,8 +790,7 @@ describe("Ship costs, versions, and fleets", function () {
         defaultGunsArmorsShields();
       await shipAttributes.write.setVariantAttributes(
         [
-          {
-            version: 1,
+          attributeParams({
             variant: 2,
             baseHull: 100,
             baseSpeed: 3,
@@ -364,7 +826,7 @@ describe("Ship costs, versions, and fleets", function () {
               { range: 0, strength: 0, movement: 0 },
               { range: 0, strength: 0, movement: 0 },
             ],
-          },
+          }),
         ],
         { account: owner.account },
       );
@@ -470,8 +932,9 @@ describe("Ship costs, versions, and fleets", function () {
     it("reverts (fails loud) when reading an unconfigured variant", async function () {
       const { shipAttributes } = await loadFixture(deployShipsFixture);
 
-      await expect(shipAttributes.read.getSpecialRange([1, 99])).to.be
-        .rejected;
+      await expect(
+        shipAttributes.read.getSpecialRange([1, 99]),
+      ).to.be.rejectedWith("VariantNotConfigured");
     });
 
     it("gives variant 2 a genuinely different baseCost than variant 1", async function () {
@@ -480,7 +943,7 @@ describe("Ship costs, versions, and fleets", function () {
       // Costs are per-variant now (ShipAttributes.costsByVariant) — set
       // variant 2's baseCost 50 higher than variant 1's constructor-seeded
       // default (50), leaving variant 1 untouched.
-      const variant2Costs = {
+      const variant2Costs = costsParams({
         version: 0,
         baseCost: 100,
         accuracy: [0, 10, 25],
@@ -490,7 +953,7 @@ describe("Ship costs, versions, and fleets", function () {
         armor: [0, 5, 10, 15],
         shields: [0, 10, 20, 30],
         special: [0, 10, 20, 15, 15, 20, 10, 0],
-      };
+      });
       await shipAttributes.write.setCosts([2, variant2Costs], {
         account: owner.account,
       });

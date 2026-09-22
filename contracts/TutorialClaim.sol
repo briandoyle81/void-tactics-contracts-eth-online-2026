@@ -121,7 +121,8 @@ contract TutorialClaim is Ownable, ReentrancyGuard {
             hull: 2,
             speed: 2
         });
-        // Rank 2 starts at 10 kills in ShipAttributes.getRank()
+        // Rank 2 starts at 10 kills under variant 1's rankThresholds as deployed
+        // (see ShipAttributes.getRank(variant, kills)) — retuning them changes this.
         s.shipData.shipsDestroyed = 10;
         s.shipData.shiny = true;
         s.shipData.isFreeShip = true;

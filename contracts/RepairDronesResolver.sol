@@ -69,7 +69,12 @@ contract RepairDronesResolver is IEffectResolver {
         // RepairDrones can only target friendly ships.
         if (acting.isCreator != target.isCreator) revert TargetNotFriendly();
 
-        uint8 range = shipAttributes.getSpecialRange(slot, variant);
+        uint16 attrVersion = _pinnedVersion(gameId, shipId);
+        uint8 range = shipAttributes.getSpecialRangeAt(
+            variant,
+            attrVersion,
+            slot
+        );
         if (
             _manhattanDistance(
                 actingRow,
@@ -79,7 +84,11 @@ contract RepairDronesResolver is IEffectResolver {
             ) > range
         ) revert OutOfRange();
 
-        uint8 strength = shipAttributes.getSpecialStrength(slot, variant);
+        uint8 strength = shipAttributes.getSpecialStrengthAt(
+            variant,
+            attrVersion,
+            slot
+        );
 
         effects = new SpecialEffect[](1);
         effects[0] = SpecialEffect({
@@ -90,6 +99,17 @@ contract RepairDronesResolver is IEffectResolver {
             newCol: 0,
             removalKind: 0
         });
+    }
+
+    // The acting ship's attributes version, pinned when the game snapshotted
+    // its attributes at start (Game.calculateShipAttributes). Special numbers
+    // are read at THIS version so publishing or rolling back a version can't
+    // change them under an in-flight game (see ShipAttributes.getSpecialRangeAt).
+    function _pinnedVersion(
+        uint gameId,
+        uint shipId
+    ) private view returns (uint16) {
+        return game.getShipAttributes(gameId, shipId).version;
     }
 
     function _manhattanDistance(

@@ -1,5 +1,5 @@
 {
-  "_comment": "Real variant-2 (faction 2) renderer pipeline manifest, wired against the actual variant-2-pixel.psd (file on disk: 'variant-2-pixel copy.psd' -- consider renaming to drop ' copy' for clarity). Layer->slot mapping confirmed with the user 2026-08-17: weapon art maps to MainWeapon by theme (medium-mining-laser=Generic/'Medium Mining Laser', linear-accelerator=Sniper/'Linear Accelerator', torpedo-launcher=Missile/'Torpedo Launcher', mining-drill=Close/'Mining Drill', matching the renamed strings in RenderMetadata.sol). MainWeapon enum members themselves were renamed 2026-08-21 from item names (Laser/Railgun/MissileLauncher/PlasmaCannon) to generic role slots (Generic/Sniper/Missile/Close) since variant 2's lineup reskins them as mining equipment, not weapons -- the old item names baked into the enum no longer matched variant 2's fiction. special art maps by matching resolver identity (lightening-field=Slot4/'Lightening Field', attack-drones=Slot5/'Attack Drones', aux-engine=Slot6/'Aux Engine', matching the renamed strings in DeployAndConfig.ts). fore-3 fills the third required fore tier (same structural slot as variant 1's fore-2); fore-special fills the optional 'perfect ship' slot (same structural slot as variant 1's fore-perfect).",
+  "_comment": "Real variant-2 (faction 2) renderer pipeline manifest, wired against the actual variant-2-pixel.psd (file on disk: 'variant-2-pixel copy.psd' -- consider renaming to drop ' copy' for clarity). Layer->slot mapping confirmed with the user 2026-08-17: weapon art maps to MainWeapon by theme (medium-mining-laser=Generic/'Medium Mining Laser', linear-accelerator=Sniper/'Linear Accelerator', torpedo-launcher=Missile/'Torpedo Launcher', mining-drill=Close/'Mining Drill', matching the renamed strings in RenderMetadata.sol). MainWeapon enum members themselves were renamed 2026-08-21 from item names (Laser/Railgun/MissileLauncher/PlasmaCannon) to generic role slots (Generic/Sniper/Missile/Close) since variant 2's lineup reskins them as mining equipment, not weapons -- the old item names baked into the enum no longer matched variant 2's fiction. special art maps by matching resolver identity (lightening-field=Slot1/'Lightening Field', attack-drones=Slot2/'Attack Drones', aux-engine=Slot3/'Aux Engine', matching the renamed strings in DeployAndConfig.ts). Special slots are per-faction (behavior and strength are looked up by variant, then slot), so variant 2's slots 1-3 are unrelated to variant 1's slots 1-3; The leaf contracts were renamed RenderSpecial4V2/5V2/6V2 -> RenderSpecial1V2/2V2/3V2 on 2026-09-20 to match. fore-3 fills the third required fore tier (same structural slot as variant 1's fore-2); fore-special fills the optional 'perfect ship' slot (same structural slot as variant 1's fore-perfect).",
   "psdFile": "variant-2-pixel copy.psd",
   "canvasSize": 256,
   "outputDir": "contracts/RenderersV2",
@@ -47,9 +47,9 @@
     "special": {
       "combinerContract": "RenderSpecialV2",
       "leaves": [
-        { "psdLayerName": "lightening-field", "contractName": "RenderSpecial4V2", "enumValue": "Special.Slot4", "required": true },
-        { "psdLayerName": "attack-drones", "contractName": "RenderSpecial5V2", "enumValue": "Special.Slot5", "required": true },
-        { "psdLayerName": "aux-engine", "contractName": "RenderSpecial6V2", "enumValue": "Special.Slot6", "required": true }
+        { "psdLayerName": "lightening-field", "contractName": "RenderSpecial1V2", "enumValue": "Special.Slot1", "required": true },
+        { "psdLayerName": "attack-drones", "contractName": "RenderSpecial2V2", "enumValue": "Special.Slot2", "required": true },
+        { "psdLayerName": "aux-engine", "contractName": "RenderSpecial3V2", "enumValue": "Special.Slot3", "required": true }
       ]
     }
   }

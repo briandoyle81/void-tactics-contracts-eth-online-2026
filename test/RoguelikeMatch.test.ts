@@ -218,7 +218,9 @@ describe("RoguelikeMatch / RoguelikeResupply / RoguelikeNodeMap", function () {
       expect(deployed.roguelikeResupply.address).to.match(/^0x/);
       expect(deployed.roguelikeNodeMap.address).to.match(/^0x/);
       expect(deployed.roguelikeRun.address).to.match(/^0x/);
-      expect(deployed.roguelikeAIController.address).to.match(/^0x/);
+      expect(deployed.aiBehaviorRegistry.address).to.match(/^0x/);
+      expect(deployed.variant1AI.address).to.match(/^0x/);
+      expect(deployed.variant2AI.address).to.match(/^0x/);
       expect(deployed.singlePlayerOrchestratorRegistry.address).to.match(/^0x/);
     });
 

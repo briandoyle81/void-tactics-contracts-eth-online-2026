@@ -36,9 +36,9 @@ These notes are intentionally kept out of the main `README.md` so the public pro
 - CRITICAL: Ensure there is a path to upgrade ships and add new collections.
 - CRITICAL: Ensure ship collections can be expanded and new weapon specials can be added.
 - CRITICAL: Ensure ship migration is possible.
-- CRITICAL: Need ability to adjust bonus and leveling tier values.
-- Not done but possible via replacing `Attributes` contract: CRITICAL add controls to change ship rank tiers.
-- Costs should probably be in attributes arrays instead of separate structures.
+- ~~CRITICAL: Need ability to adjust bonus and leveling tier values.~~ Done 2026-09-20: rank thresholds and per-rank bonus % are now part of each variant's published attributes table (`rankThresholds`/`rankBonusPct`), versioned and immutable like the rest.
+- ~~Not done but possible via replacing `Attributes` contract: CRITICAL add controls to change ship rank tiers.~~ Done 2026-09-20 (same change).
+- Costs should probably be in attributes arrays instead of separate structures. (Considered 2026-09-20 and deferred: merging would bump a variant's cost version — and stale every ship of that variant until `syncShipCosts` — on every attribute tweak. Costs and attributes are now versioned the same way, per variant, but stay separate tables.)
 - CRITICAL: Store last move in contract.
 - Limit fleet max cost.
 

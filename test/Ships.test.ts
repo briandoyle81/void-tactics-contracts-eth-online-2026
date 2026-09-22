@@ -3,6 +3,7 @@ import { loadFixture } from "@nomicfoundation/hardhat-toolbox-viem/network-helpe
 import hre from "hardhat";
 import { parseEther, keccak256, toBytes } from "viem";
 import { deployShipsFixture } from "./fixtures/deployShipsFixture";
+import { attributeParams, costsParams } from "./fixtures/attributeTables";
 import {
   Ship,
   ShipData,
@@ -837,7 +838,7 @@ describe("Ships", function () {
           mainWeapon: 0, // Generic -> "Medium Mining Laser" for variant 2
           armor: 0,
           shields: 0,
-          special: 4, // LighteningField
+          special: 1, // LighteningField (variant 2's slot 1)
         },
         traits: {
           serialNumber: 999n,
@@ -907,9 +908,10 @@ describe("Ships", function () {
         account: owner.account,
       });
 
-      // Slot 4 (Electric Storm) only has a name set for variant 2 — a
-      // variant-1 ship equipped with slot 4 (inert for that faction) has
-      // no configured name for (variant 1, slot 4).
+      // Names are keyed by (variant, slot). Slot 4 is unused by both
+      // factions (variant 2's specials are its slots 1-3), so a variant-1
+      // ship equipped with slot 4 has no configured name for
+      // (variant 1, slot 4).
       const variant1SlotFourShip = {
         name: "Variant 1 Slot 4 Ship",
         id: 1n,
@@ -3371,12 +3373,12 @@ describe("Ships", function () {
 
       // Try to update attributes version as non-owner
       await expect(
-        shipAttributes.write.setCurrentAttributesVersion([2], {
+        shipAttributes.write.setCurrentAttributesVersion([1, 1], {
           account: user1.account,
         }),
       ).to.be.rejectedWith("OwnableUnauthorizedAccount");
 
-      // Try to use setAllAttributes as non-owner
+      // Try to publish attributes as non-owner
       const newGuns = [
         { range: 12, damage: 30, movement: 0 },
         { range: 20, damage: 25, movement: 0 },
@@ -3406,16 +3408,9 @@ describe("Ships", function () {
       const newHull = [0, 10, 20, 30];
 
       await expect(
-        shipAttributes.write.startNewAttributesVersion({
-          account: user1.account,
-        }),
-      ).to.be.rejectedWith("OwnableUnauthorizedAccount");
-
-      await expect(
         shipAttributes.write.setVariantAttributes(
           [
-            {
-              version: 1,
+            attributeParams({
               variant: 1,
               baseHull: 120,
               baseSpeed: 7,
@@ -3426,7 +3421,7 @@ describe("Ships", function () {
               armors: newArmors,
               shields: newShields,
               specials: newSpecials,
-            },
+            }),
           ],
           { account: user1.account },
         ),
@@ -3454,7 +3449,7 @@ describe("Ships", function () {
       };
 
       // Update costs for variant 1
-      await shipAttributes.write.setCosts([1, newCosts], {
+      await shipAttributes.write.setCosts([1, costsParams(newCosts)], {
         account: owner.account,
       });
 
@@ -3489,19 +3484,22 @@ describe("Ships", function () {
 
       // Try to update costs as non-owner
       await expect(
-        shipAttributes.write.setCosts([1, newCosts], {
+        shipAttributes.write.setCosts([1, costsParams(newCosts)], {
           account: user1.account,
         }),
       ).to.be.rejectedWith("OwnableUnauthorizedAccount");
     });
 
-    it("Should allow owner to update all attributes at once and increment version", async function () {
+    it("Should allow owner to publish a new attributes version for one variant", async function () {
       const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
 
-      // Get current version
-      const currentVersion =
-        await shipAttributes.read.getCurrentAttributesVersion();
-      expect(currentVersion).to.equal(1);
+      // The deploy module publishes version 1 for each variant.
+      expect(await shipAttributes.read.getCurrentAttributesVersion([1])).to.equal(
+        1,
+      );
+      expect(await shipAttributes.read.getLatestAttributesVersion([1])).to.equal(
+        1,
+      );
 
       // Define new attributes
       const newGuns = [
@@ -3532,20 +3530,10 @@ describe("Ships", function () {
       const newEngineSpeeds = [0, 2, 3];
       const newHull = [0, 10, 20];
 
-      // Start a new attributes version
-      await shipAttributes.write.startNewAttributesVersion({
-        account: owner.account,
-      });
-
-      // Verify version incremented
-      const newVersion =
-        await shipAttributes.read.getCurrentAttributesVersion();
-      expect(newVersion).to.equal(2);
-
+      // One call publishes version 2 for variant 1 and makes it live.
       await shipAttributes.write.setVariantAttributes(
         [
-          {
-            version: 2,
+          attributeParams({
             variant: 1,
             baseHull: 120,
             baseSpeed: 4,
@@ -3556,29 +3544,38 @@ describe("Ships", function () {
             armors: newArmors,
             shields: newShields,
             specials: newSpecials,
-          },
+          }),
         ],
         {
           account: owner.account,
         },
       );
 
-      // Verify new attributes are set correctly
-      const versionData = await shipAttributes.read.getAttributesVersionBase([
+      expect(await shipAttributes.read.getCurrentAttributesVersion([1])).to.equal(
         2,
+      );
+      expect(await shipAttributes.read.getLatestAttributesVersion([1])).to.equal(
+        2,
+      );
+
+      // The new version's attributes are set correctly...
+      const v2 = await shipAttributes.read.getVariantAttributes([1, 2]);
+      expect(v2.baseHull).to.equal(120);
+      expect(v2.baseSpeed).to.equal(4);
+
+      // ...version 1 is untouched (published versions are immutable)...
+      const v1 = await shipAttributes.read.getVariantAttributes([1, 1]);
+      expect(v1.baseHull).to.equal(100);
+      expect(v1.baseSpeed).to.equal(4);
+
+      // ...and variant 2 is unaffected (versions are per variant).
+      expect(await shipAttributes.read.getCurrentAttributesVersion([2])).to.equal(
         1,
-      ]);
-      expect(versionData[0]).to.equal(2); // version
-      expect(versionData[1]).to.equal(120); // baseHull
-      expect(versionData[2]).to.equal(4); // baseSpeed
+      );
     });
 
     it("caps damageReduction at 100 when armor+shield alone sum above it (HA3-02)", async function () {
       const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
-
-      await shipAttributes.write.startNewAttributesVersion({
-        account: owner.account,
-      });
 
       const flatGuns = Array(4).fill({ range: 5, damage: 50, movement: 0 });
       const flatSpecials = Array(4).fill({
@@ -3588,8 +3585,7 @@ describe("Ships", function () {
       });
       await shipAttributes.write.setVariantAttributes(
         [
-          {
-            version: 2,
+          attributeParams({
             variant: 1,
             baseHull: 100,
             baseSpeed: 5,
@@ -3610,7 +3606,7 @@ describe("Ships", function () {
               { damageReduction: 60, movement: 0 }, // shield slot 3: 60% -> 130% combined
             ],
             specials: flatSpecials,
-          },
+          }),
         ],
         { account: owner.account },
       );
@@ -3652,10 +3648,6 @@ describe("Ships", function () {
     it("caps damageReduction at 100 even when a sub-100 base is pushed over by the rank-multiplier bonus (HA3-02)", async function () {
       const { shipAttributes, owner } = await loadFixture(deployShipsFixture);
 
-      await shipAttributes.write.startNewAttributesVersion({
-        account: owner.account,
-      });
-
       const flatGuns = Array(4).fill({ range: 5, damage: 50, movement: 0 });
       const flatSpecials = Array(4).fill({
         range: 0,
@@ -3664,8 +3656,7 @@ describe("Ships", function () {
       });
       await shipAttributes.write.setVariantAttributes(
         [
-          {
-            version: 2,
+          attributeParams({
             variant: 1,
             baseHull: 100,
             baseSpeed: 5,
@@ -3686,7 +3677,7 @@ describe("Ships", function () {
               { damageReduction: 0, movement: 0 },
             ],
             specials: flatSpecials,
-          },
+          }),
         ],
         { account: owner.account },
       );
@@ -3758,16 +3749,9 @@ describe("Ships", function () {
       const newHull = [0, 10, 20];
 
       await expect(
-        shipAttributes.write.startNewAttributesVersion({
-          account: user1.account,
-        }),
-      ).to.be.rejectedWith("OwnableUnauthorizedAccount");
-
-      await expect(
         shipAttributes.write.setVariantAttributes(
           [
-            {
-              version: 1,
+            attributeParams({
               variant: 1,
               baseHull: 120,
               baseSpeed: 4,
@@ -3778,7 +3762,7 @@ describe("Ships", function () {
               armors: newArmors,
               shields: newShields,
               specials: newSpecials,
-            },
+            }),
           ],
           {
             account: user1.account,

@@ -26,6 +26,26 @@ interface IShipAttributes {
         uint16 _variant
     ) external view returns (uint8);
 
+    // Pinned-version reads: in-game logic passes the acting ship's
+    // Attributes.version (its game-start snapshot) so a later publish or
+    // rollback can't change the numbers mid-game.
+    function getSpecialRangeAt(
+        uint16 _variant,
+        uint16 _version,
+        Special _special
+    ) external view returns (uint8);
+
+    function getSpecialStrengthAt(
+        uint16 _variant,
+        uint16 _version,
+        Special _special
+    ) external view returns (uint8);
+
+    function getRank(
+        uint16 _variant,
+        uint _shipsDestroyed
+    ) external view returns (uint8);
+
     function getGunData(
         MainWeapon _weapon,
         uint16 _variant
@@ -59,17 +79,24 @@ interface IShipAttributes {
         uint16 _variant
     ) external view returns (uint16);
 
-    // Attributes version management functions
-    function setCurrentAttributesVersion(uint16 _version) external;
+    // Attributes version management functions (per variant)
+    function setCurrentAttributesVersion(
+        uint16 _variant,
+        uint16 _version
+    ) external;
 
-    function getCurrentAttributesVersion() external view returns (uint16);
-
-    function getAttributesVersionBase(
-        uint16 _version,
+    function getCurrentAttributesVersion(
         uint16 _variant
-    ) external view returns (uint16 version, uint8 baseHull, uint8 baseSpeed);
+    ) external view returns (uint16);
 
-    function startNewAttributesVersion() external returns (uint16 newVersion);
+    function getLatestAttributesVersion(
+        uint16 _variant
+    ) external view returns (uint16);
+
+    function getVariantAttributes(
+        uint16 _variant,
+        uint16 _version
+    ) external view returns (VariantAttributeData memory);
 
     function setVariantAttributes(
         SetVariantAttributesParams memory params

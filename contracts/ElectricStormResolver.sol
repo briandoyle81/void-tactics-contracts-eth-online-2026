@@ -62,23 +62,19 @@ contract ElectricStormResolver is IEffectResolver {
 
     function resolveEffect(
         uint gameId,
-        uint /* shipId */,
+        uint shipId,
         uint16 variant,
         uint /* targetShipId */,
         int16 actingRow,
         int16 actingCol
     ) external view returns (SpecialEffect[] memory effects) {
-        // HA3-06: int8(uint8) silently wraps negative for strength >= 128,
-        // inverting "add to reactor timer" into "subtract from it." Clamp
-        // to int8's max instead of letting a misconfigured value flip sign.
-        uint8 rawStrength = shipAttributes.getSpecialStrength(slot, variant);
-        int8 clampedStrength = rawStrength > 127 ? int8(127) : int8(rawStrength);
-        StormContext memory ctx = StormContext({
-            actingRow: actingRow,
-            actingCol: actingCol,
-            range: shipAttributes.getSpecialRange(slot, variant),
-            strength: clampedStrength
-        });
+        StormContext memory ctx = _buildContext(
+            gameId,
+            shipId,
+            variant,
+            actingRow,
+            actingCol
+        );
 
         ShipPosition[] memory positions = game.getAllShipPositions(gameId);
 
@@ -106,6 +102,39 @@ contract ElectricStormResolver is IEffectResolver {
             });
             idx++;
         }
+    }
+
+    // Range/strength are read at the acting ship's attributes version pinned
+    // when the game snapshotted its attributes at start (see
+    // ShipAttributes.getSpecialRangeAt), so publishing or rolling back a
+    // version can't change them under an in-flight game.
+    function _buildContext(
+        uint gameId,
+        uint shipId,
+        uint16 variant,
+        int16 actingRow,
+        int16 actingCol
+    ) private view returns (StormContext memory) {
+        uint16 attrVersion = game.getShipAttributes(gameId, shipId).version;
+        // HA3-06: int8(uint8) silently wraps negative for strength >= 128,
+        // inverting "add to reactor timer" into "subtract from it." Clamp
+        // to int8's max instead of letting a misconfigured value flip sign.
+        uint8 rawStrength = shipAttributes.getSpecialStrengthAt(
+            variant,
+            attrVersion,
+            slot
+        );
+        return
+            StormContext({
+                actingRow: actingRow,
+                actingCol: actingCol,
+                range: shipAttributes.getSpecialRangeAt(
+                    variant,
+                    attrVersion,
+                    slot
+                ),
+                strength: rawStrength > 127 ? int8(127) : int8(rawStrength)
+            });
     }
 
     function _inRange(
