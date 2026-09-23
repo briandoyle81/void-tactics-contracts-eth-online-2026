@@ -23,13 +23,18 @@ Mirrors the on-chain rules that matter for raw stat balance:
   - ship generation odds match GenerateNewShip (tier 50/30/20, weapon %4,
     armor-or-shield coin flip then %4, special %8)
 
-NOT modelled: obstacles / line of sight, scoring tiles, special-item effects
-(EMP, repair, flak, storm, swarm) -- only specials' movement and cost.
+Obstacles / line of sight and movement-blocking terrain ARE modelled when a
+`blocked`/`impassable` set is passed in (see --terrain-sample and
+docs/variant-balance.md's "Terrain and LOS" section) -- ported from
+contracts/Maps.sol via los.py, the same port scripts/map-design/los.ts uses.
+Still NOT modelled: scoring tiles, special-item effects (EMP, repair, flak,
+storm, swarm) -- only specials' movement and cost.
 Each side follows a simple policy, 'kite' or 'rush', chosen independently; the
 policies are otherwise identical for both variants. Kiting beats rushing in this
 model, so judge parity on the kite-vs-kite cell (see docs/variant-balance.md).
 """
-import random, sys, itertools, multiprocessing as mp
+import random, sys, os, json, itertools, multiprocessing as mp
+from los import has_line_of_sight, has_movement_path
 
 W, H = 17, 11
 
@@ -120,13 +125,29 @@ def place(fleet, side, rng, occ):
     for s, cell in zip(fleet, cells):
         s['pos'] = cell; s['side'] = side; occ.add(cell)
 
-def act(ship, enemies, allies_occ, policy):
+def _legal_dest(p, me, allies_occ, impassable):
+    """A candidate destination is legal iff it's on the grid, unoccupied by
+    an ally (staying in place is always allowed), and the straight-line path
+    from `me` doesn't cross an impassable tile (Maps.sol's hasMovementPath --
+    blocks landing ON one AND passing THROUGH one)."""
+    if not (0 <= p[0] < H and 0 <= p[1] < W): return False
+    if p != me and p in allies_occ: return False
+    if impassable and not has_movement_path(impassable, me[0], me[1], p[0], p[1]):
+        return False
+    return True
+
+
+def act(ship, enemies, allies_occ, policy, blocked=frozenset(), impassable=frozenset()):
     """One ship's move + shot. Returns None."""
     foes = [e for e in enemies if e['hp'] > 0 and e['alive']]
     if not foes: return
     me = ship['pos']
-    # candidate targets reachable this turn: dist - mv <= range
+    # candidate targets reachable this turn: dist - mv <= range (a coarse
+    # pre-filter on the DISTANCE metric only -- the real range+LOS+movement
+    # check happens per candidate position below, same as the reach set
+    # here is just "worth considering", not "definitely reachable").
     reach = [e for e in foes if dist(me, e['pos']) - ship['mv'] <= ship['range']]
+    best, best_score, best_target = None, None, None
     if reach:
         # focus the target that dies soonest (lowest hits-to-kill), tie -> lowest hp
         def key(e):
@@ -134,39 +155,46 @@ def act(ship, enemies, allies_occ, policy):
             hits = -(-e['hp'] // d) if d > 0 else 999
             return (hits, e['hp'])
         tgt = min(reach, key=key)
-        best, best_score = None, None
         for dr_ in range(-ship['mv'], ship['mv'] + 1):
             for dc in range(-(ship['mv'] - abs(dr_)), ship['mv'] - abs(dr_) + 1):
                 p = (me[0] + dr_, me[1] + dc)
-                if not (0 <= p[0] < H and 0 <= p[1] < W): continue
-                if p != me and p in allies_occ: continue
+                if not _legal_dest(p, me, allies_occ, impassable): continue
                 d = dist(p, tgt['pos'])
                 if d > ship['range']: continue
+                # LOS is only required past range 1, exactly matching
+                # Game.sol's _performShoot (manhattan > 1 && !hasMaps) --
+                # no "blind shot" concept exists on-chain, so a candidate
+                # without LOS past range 1 is simply not a legal shooting
+                # position, not a fallback worth scoring.
+                if d > 1 and blocked and not has_line_of_sight(blocked, p[0], p[1], tgt['pos'][0], tgt['pos'][1]):
+                    continue
                 score = d if policy == 'kite' else -d
                 if best is None or score > best_score:
-                    best, best_score = p, score
-        if best is None: return
+                    best, best_score, best_target = p, score, tgt
+    if best is not None:
         allies_occ.discard(me); allies_occ.add(best); ship['pos'] = best
         # shoot
-        d = ship['dmg'] - (ship['dmg'] * tgt['dr']) // 100
-        if d >= tgt['hp']:
-            tgt['hp'] = 0
+        d = ship['dmg'] - (ship['dmg'] * best_target['dr']) // 100
+        if d >= best_target['hp']:
+            best_target['hp'] = 0
         else:
-            tgt['hp'] -= d
-    else:
-        # advance: tile within movement minimizing distance to nearest foe
-        nearest = min(foes, key=lambda e: dist(me, e['pos']))
-        best, best_d = me, dist(me, nearest['pos'])
-        for dr_ in range(-ship['mv'], ship['mv'] + 1):
-            for dc in range(-(ship['mv'] - abs(dr_)), ship['mv'] - abs(dr_) + 1):
-                p = (me[0] + dr_, me[1] + dc)
-                if not (0 <= p[0] < H and 0 <= p[1] < W): continue
-                if p in allies_occ: continue
-                d = dist(p, nearest['pos'])
-                if d < best_d: best, best_d = p, d
-        allies_occ.discard(me); allies_occ.add(best); ship['pos'] = best
+            best_target['hp'] -= d
+        return
+    # No reachable position has both range and (adjacency or LOS) -- fall
+    # back to advancing, same as if `reach` had been empty. Terrain can make
+    # a ship that's nominally "in range" by distance alone unable to
+    # actually take the shot this turn.
+    nearest = min(foes, key=lambda e: dist(me, e['pos']))
+    best, best_d = me, dist(me, nearest['pos'])
+    for dr_ in range(-ship['mv'], ship['mv'] + 1):
+        for dc in range(-(ship['mv'] - abs(dr_)), ship['mv'] - abs(dr_) + 1):
+            p = (me[0] + dr_, me[1] + dc)
+            if not _legal_dest(p, me, allies_occ, impassable): continue
+            d = dist(p, nearest['pos'])
+            if d < best_d: best, best_d = p, d
+    allies_occ.discard(me); allies_occ.add(best); ship['pos'] = best
 
-def battle(fleets, rng, policies, first_side, max_rounds=80):
+def battle(fleets, rng, policies, first_side, max_rounds=80, blocked=frozenset(), impassable=frozenset()):
     # policies[side] is that side's play style ('kite' or 'rush'); side 0 = variant 1, side 1 = variant 2
     occ = set()
     for side in (0, 1): place(fleets[side], side, rng, occ)
@@ -190,7 +218,7 @@ def battle(fleets, rng, policies, first_side, max_rounds=80):
                 continue
             ship = queues[turn].pop(0)
             if ship['hp'] > 0 and ship['alive']:
-                act(ship, fleets[1 - turn], occ, policies[turn])
+                act(ship, fleets[1 - turn], occ, policies[turn], blocked, impassable)
             if queues[1 - turn]:
                 turn = 1 - turn
     hp = [sum(s['hp'] for s in f) for f in fleets]
@@ -201,23 +229,26 @@ def battle(fleets, rng, policies, first_side, max_rounds=80):
     return 1.0 if hp[1] > hp[0] else (0.0 if hp[0] > hp[1] else 0.5)
 
 def run(args):
-    t2, limit, policies, n, seed = args        # policies = (variant 1's style, variant 2's style)
+    t2, limit, policies, n, seed, blocked, impassable = args   # policies = (variant 1's style, variant 2's style)
     rng = random.Random(seed)
     wins = 0.0
     for i in range(n):
         f1 = build_fleet(rng, V1, limit)
         f2 = build_fleet(rng, t2, limit)
-        res = battle([f1, f2], rng, policies, first_side=i % 2)
+        res = battle([f1, f2], rng, policies, first_side=i % 2, blocked=blocked, impassable=impassable)
         wins += res
     return wins / n   # fraction of matches variant 2 (side 1) wins
 
 STYLES = ('kite', 'rush')
 STYLE_PAIRS = tuple(itertools.product(STYLES, STYLES))   # (variant 1 style, variant 2 style)
 
-def winrate(t2, limits=(500, 1000, 2000), pairs=STYLE_PAIRS, n=1500, seed=1):
-    """Variant 2's win rate for every (cost limit, (v1 style, v2 style)) cell."""
+def winrate(t2, limits=(500, 1000, 2000), pairs=STYLE_PAIRS, n=1500, seed=1, blocked=frozenset(), impassable=frozenset()):
+    """Variant 2's win rate for every (cost limit, (v1 style, v2 style)) cell.
+    `blocked`/`impassable` (sets of (row,col) tuples) model a specific
+    generated map's terrain -- see --terrain-sample. Empty (the default)
+    reproduces the original open-grid baseline exactly."""
     keys = list(itertools.product(limits, pairs))
-    jobs = [(t2, lim, pair, n, seed + k) for k, (lim, pair) in enumerate(keys)]
+    jobs = [(t2, lim, pair, n, seed + k, blocked, impassable) for k, (lim, pair) in enumerate(keys)]
     with mp.Pool() as pool:
         out = pool.map(run, jobs)
     return dict(zip(keys, out))
@@ -228,7 +259,73 @@ def mean_ship(t, n=4000, seed=7):
     avg = lambda k: sum(s[k] for s in ships) / n
     return {k: round(avg(k), 2) for k in ('hp', 'dmg', 'range', 'mv', 'dr', 'cost')}
 
+# ---------------------------------------------------------------- terrain sampling (Phase 6)
+
+# One low- and one high-difficulty slot per archetype, drawn from
+# scripts/map-design/difficulty-table.ts's actual assignments (see that
+# file's MAIN_SPINE_ARCHETYPES list) -- 6 archetypes x 2 = 12 samples,
+# matching the plan's "1 map per archetype x low/high difficulty" target.
+TERRAIN_SAMPLE_KEYS = [
+    ('m01', 'openVoid (low)'), ('m12', 'openVoid (high)'),
+    ('m02', 'asteroidField (low)'), ('f05', 'asteroidField (high)'),
+    ('m03', 'twinPillars (low)'), ('f03', 'twinPillars (high)'),
+    ('m05', 'trenchRun (low)'), ('f01', 'trenchRun (high)'),
+    ('m06', 'debrisRing (low)'), ('m14', 'debrisRing (high)'),
+    ('m11', 'reactorCore (low)'), ('m15', 'reactorCore (high)'),
+]
+
+OUT_DIR = os.path.join(os.path.dirname(__file__), '..', 'map-design', 'out')
+
+def load_terrain(key):
+    """Reads a dense-grid map export (scripts/map-design/review-all.ts's
+    output) and returns (blocked, impassable) as sets of (row,col) tuples."""
+    path = os.path.join(OUT_DIR, f'{key}.json')
+    with open(path) as f:
+        dense = json.load(f)
+    blocked = {(r, c) for r, row in enumerate(dense['blockedTiles']) for c, v in enumerate(row) if v}
+    impassable = {(r, c) for r, row in enumerate(dense.get('impassableTiles', [])) for c, v in enumerate(row) if v}
+    return blocked, impassable
+
+def sightline_profile(blocked):
+    """Same sampling scheme as validate-map.ts's computeSightlineProfile --
+    LOS between every pair of rows drawn from the core's two edge columns,
+    sampled every other row -- so the two numbers are directly comparable."""
+    clear = total = 0
+    for row0 in range(0, H, 2):
+        for row1 in range(0, H, 2):
+            total += 1
+            if has_line_of_sight(blocked, row0, 4, row1, 12):
+                clear += 1
+    return clear / total if total else 0.0
+
+def terrain_sample_report(n=600):
+    """Runs the kite-vs-kite matchup (the parity read, per docs/variant-balance.md)
+    against each TERRAIN_SAMPLE_KEYS map's real generated terrain and reports it
+    next to the open-grid baseline and the map's sightline profile. n is lower
+    than the main table's 1500 (terrain checks are more expensive per battle);
+    noise is roughly +/-0.02 per cell at n=600."""
+    baseline = winrate(V2, limits=(1000,), pairs=(('kite', 'kite'),), n=n, seed=101)[(1000, ('kite', 'kite'))]
+    print(f'Open-grid baseline (no terrain), kite-vs-kite, cost 1000, n={n}: {baseline:.3f}\n')
+    print(f'{"map":22s} {"sightline":>10s} {"kite-vs-kite":>13s}  delta vs baseline')
+    rows = []
+    for key, label in TERRAIN_SAMPLE_KEYS:
+        try:
+            blocked, impassable = load_terrain(key)
+        except FileNotFoundError:
+            print(f'{label:22s}  (skipped -- run scripts/map-design/review-all.ts first to generate {key}.json)')
+            continue
+        sl = sightline_profile(blocked)
+        wr = winrate(V2, limits=(1000,), pairs=(('kite', 'kite'),), n=n, seed=202,
+                     blocked=blocked, impassable=impassable)[(1000, ('kite', 'kite'))]
+        delta = wr - baseline
+        print(f'{label:22s} {sl*100:9.1f}% {wr:13.3f}  {delta:+.3f}')
+        rows.append((label, sl, wr, delta))
+    return baseline, rows
+
 if __name__ == '__main__':
+    if '--terrain-sample' in sys.argv:
+        terrain_sample_report()
+        sys.exit(0)
     limits = (500, 1000, 2000)
     print('V1 mean ship', mean_ship(V1))
     print('V2 mean ship', mean_ship(V2))

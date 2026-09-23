@@ -8,6 +8,7 @@ import { existsSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 import starterContent from "../data/singlePlayerStarterContent.json";
 import roguelikeStarterContent from "../data/roguelikeStarterContent.json";
+import pvpStarterContent from "../data/pvpStarterContent.json";
 
 // Set to true only for a real production deploy, and flip it back to false
 // immediately afterward — do not leave it committed as true. Every test
@@ -1422,16 +1423,20 @@ const DeployModule = buildModule("DeployModule", (m) => {
   // strings instead of magic numbers — keep in sync if MapMode changes.
   const MAP_MODE: Record<string, number> = { PvP: 0, PvE: 1, Both: 2 };
 
-  // The roguelike campaign's first three missions fight variant 1 ships, but
-  // the NodeMap campaign's maps (and their variant-2 enemy placements) are
-  // shared by id, so those missions get their OWN maps — clones of the same
-  // layouts, with variant-1 rosters — listed in roguelikeStarterContent.json.
-  // They are appended AFTER every campaign map in the same chain, so the
-  // "id is 1-indexed array position" guess below stays trustworthy for both
-  // lists. Keys must be unique across the two lists.
+  // Every roguelike Combat node has its own dedicated map (2026-09-23 pass)
+  // — none share a campaign map's data any more, though several still share
+  // that map's AI roster (same configKeys, different terrain; see
+  // roguelikeStarterContent.json's mapPlacements). PvP maps (pvpStarterContent.json)
+  // aren't attached to any campaign/roguelike node — they're only ever
+  // selected directly via Lobbies.createLobby's mapId, so they need no
+  // mapPlacements (no AI ships in PvP) and no node/edge wiring at all. All
+  // three lists are appended in this fixed order so the "id is 1-indexed
+  // array position" guess below stays trustworthy for all of them. Keys
+  // must be unique across all three lists.
   const allMaps: any[] = [
     ...starterContent.maps,
     ...roguelikeStarterContent.maps,
+    ...pvpStarterContent.maps,
   ];
   const allMapPlacements: any[] = [
     ...starterContent.mapPlacements,
@@ -1465,6 +1470,37 @@ const DeployModule = buildModule("DeployModule", (m) => {
           );
     mapCalls[map.key] = call;
     mapIds[map.key] = mapId;
+  });
+
+  // Name + custom deployment-zone shape, per map (2026-09-23 pass). Both are
+  // additive setters on an already-created map (Maps.sol's setMapName/
+  // setCreatorZone/setJoinerZone), not creation params, so each only needs
+  // `after: [its own map's creation call]` — none of them create a new map,
+  // so unlike the loop above they carry no risk to the "id is array
+  // position" guess and can run in any order relative to each other. An
+  // empty creatorZone/joinerZone means "use the engine default column
+  // band" (Maps.sol's own convention), so those calls are skipped entirely
+  // rather than sent as a no-op empty-array write.
+  allMaps.forEach((map) => {
+    const capitalizedKey = `${map.key[0].toUpperCase()}${map.key.slice(1)}`;
+    if (map.name) {
+      m.call(maps, "setMapName", [mapIds[map.key], map.name], {
+        id: `Name${capitalizedKey}Map`,
+        after: [mapCalls[map.key]],
+      });
+    }
+    if (map.creatorZone?.length) {
+      m.call(maps, "setCreatorZone", [mapIds[map.key], map.creatorZone], {
+        id: `SetCreatorZone${capitalizedKey}`,
+        after: [mapCalls[map.key]],
+      });
+    }
+    if (map.joinerZone?.length) {
+      m.call(maps, "setJoinerZone", [mapIds[map.key], map.joinerZone], {
+        id: `SetJoinerZone${capitalizedKey}`,
+        after: [mapCalls[map.key]],
+      });
+    }
   });
 
   const aiConfigCalls: ReturnType<typeof m.call>[] = [];

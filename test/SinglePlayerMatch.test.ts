@@ -598,22 +598,28 @@ describe("SinglePlayerMatch", function () {
   });
 
   describe("Deploy-seeded starter maps", function () {
-    it("seeds thirty starter maps scaling from an easy opener (m01) through a matched-difficulty midpoint (m15) to the hardest finale (f06)", async function () {
+    it("seeds sixty-five starter maps scaling from an easy opener (m01) through a matched-difficulty midpoint (m15) to the hardest finale (f06)", async function () {
       const { maps, aiEncounters } = await loadFixture(deploySinglePlayerFixture);
 
-      // 30 campaign maps (ids 1-30) plus the 5 roguelike-only maps (ids
-      // 31-35) that give the roguelike's first three missions variant-1
-      // rosters (see docs/roguelike-progression.md). Everything below reads
-      // campaign maps by id, so the extra five don't disturb it.
-      expect(await maps.read.mapCount()).to.equal(35n);
+      // 30 campaign maps (ids 1-30), 30 dedicated roguelike maps (ids
+      // 31-60 — every roguelike Combat node has its own map since the
+      // 2026-09-23 pass, not just the first three missions' variant-1
+      // rosters), plus 5 PvP-only maps (ids 61-65, not attached to any
+      // node). Everything below reads campaign maps by id, so the rest
+      // don't disturb it.
+      expect(await maps.read.mapCount()).to.equal(65n);
 
-      // Map 1 (m01, id 1): easiest mission — light terrain, one low-value
-      // scoring tile, a small 3-ship fleet.
+      // Map 1 (m01, id 1): easiest mission — thematically generated "Open
+      // Void" terrain (light cover, long sightlines), one contested
+      // center scoring tile plus a symmetric flanking pair, a small
+      // 3-ship fleet.
       const map1Blocked = await maps.read.getPresetMap([1n]);
-      expect(map1Blocked.length).to.equal(4);
+      expect(map1Blocked.length).to.equal(2);
       const map1Scoring = await maps.read.getPresetScoringMap([1n]);
-      expect(map1Scoring.length).to.equal(1);
-      expect(map1Scoring[0].points).to.equal(5);
+      expect(map1Scoring.length).to.equal(3);
+      for (const tile of map1Scoring as any[]) {
+        expect(tile.points).to.equal(5);
+      }
 
       const [map1Positions] = await aiEncounters.read.getMapPlacements([1n]);
       expect(map1Positions.length).to.equal(3);
@@ -623,21 +629,27 @@ describe("SinglePlayerMatch", function () {
       }
 
       // Map 15 (m15, id 15): the "average" mission at the campaign's
-      // midpoint — 1000 player-cost-limit vs 1000 enemy threat, 5 scoring
-      // tiles worth 10 points each, ~30% of the 187-cell grid blocked.
+      // midpoint — a tiered objective (one 20-point contested center, four
+      // 10-point one-time flanking holds) over dense generated cover.
       const map15Blocked = await maps.read.getPresetMap([15n]);
-      expect(map15Blocked.length).to.equal(56);
+      expect(map15Blocked.length).to.equal(53);
       const map15Scoring = await maps.read.getPresetScoringMap([15n]);
       expect(map15Scoring.length).to.equal(5);
-      for (const tile of map15Scoring as any[]) {
-        expect(tile.points).to.equal(10);
-      }
+      expect(
+        (map15Scoring as any[]).filter((t) => t.points === 20).length,
+      ).to.equal(1);
+      expect(
+        (map15Scoring as any[]).filter((t) => t.points === 10).length,
+      ).to.equal(4);
 
-      // Map 30 (f06, id 30): the hardest, final mission — same difficulty
-      // ceiling as the old 10-node campaign's finale, maxed out on the
-      // live-tunable AI fleet size (14 ships).
+      // Map 30 (f06, id 30): the hardest, final mission — same tiered
+      // objective shape as m15, maxed out on the live-tunable AI fleet
+      // size (14 ships).
       const map30Scoring = await maps.read.getPresetScoringMap([30n]);
-      expect(map30Scoring.length).to.equal(8);
+      expect(map30Scoring.length).to.equal(5);
+      expect(
+        (map30Scoring as any[]).filter((t) => t.points === 20).length,
+      ).to.equal(1);
       const [map30Positions] = await aiEncounters.read.getMapPlacements([30n]);
       expect(map30Positions.length).to.equal(14);
       for (const pos of map30Positions as any[]) {

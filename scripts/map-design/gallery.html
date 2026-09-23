@@ -1,0 +1,514 @@
+<title>Void Tactics Atlas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --void: #0a0e15;
+    --void-2: #0f1520;
+    --panel: #141b28;
+    --panel-2: #182030;
+    --line: #263041;
+    --line-soft: #1c2432;
+    --ink: #e7ebf2;
+    --ink-dim: #97a2b5;
+    --ink-faint: #5c6779;
+    --signal: #49c9c2;
+    --signal-dim: #2c5c59;
+    --gold: #e8c369;
+    --hazard: #d98a3d;
+    --spawn: #b481e6;
+    --creator: #3aa0c4;
+    --joiner: #b481e6;
+    --hard: #4a5a70;
+    --soft: #2e394a;
+    --danger: #e0694f;
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --void: #eef1f6;
+      --void-2: #e6eaf1;
+      --panel: #ffffff;
+      --panel-2: #f5f7fb;
+      --line: #d6dce6;
+      --line-soft: #e2e7ef;
+      --ink: #172033;
+      --ink-dim: #5a677d;
+      --ink-faint: #93a0b3;
+      --signal: #1a8a83;
+      --signal-dim: #cfe9e7;
+      --gold: #a67c1e;
+      --hazard: #b3691f;
+      --spawn: #7a4fb0;
+      --creator: #1a7ea3;
+      --joiner: #7a4fb0;
+      --hard: #7c8ba0;
+      --soft: #c3ccda;
+      --danger: #c14d34;
+    }
+  }
+  :root[data-theme="dark"] {
+    --void: #0a0e15; --void-2: #0f1520; --panel: #141b28; --panel-2: #182030;
+    --line: #263041; --line-soft: #1c2432; --ink: #e7ebf2; --ink-dim: #97a2b5;
+    --ink-faint: #5c6779; --signal: #49c9c2; --signal-dim: #2c5c59; --gold: #e8c369;
+    --hazard: #d98a3d; --spawn: #b481e6; --creator: #3aa0c4; --joiner: #b481e6;
+    --hard: #4a5a70; --soft: #2e394a; --danger: #e0694f;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--void);
+    color: var(--ink);
+    padding-inline: 20px;
+    padding-block: 24px calc(48px + env(safe-area-inset-bottom, 0px));
+  }
+  h1, h2, h3, .display { font-family: "Chakra Petch", ui-sans-serif, sans-serif; letter-spacing: 0.01em; }
+  .mono, .stat-num, .coord { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  a { color: var(--signal); }
+
+  /* ---- header ---- */
+  header.top {
+    max-width: 1360px;
+    margin: 0 auto 28px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px 32px;
+    align-items: flex-end;
+    justify-content: space-between;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--line);
+  }
+  .title-block h1 {
+    margin: 0 0 6px;
+    font-size: clamp(28px, 4vw, 40px);
+    font-weight: 700;
+    text-wrap: balance;
+  }
+  .title-block .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--signal);
+    margin: 0 0 10px;
+  }
+  .title-block p { margin: 0; color: var(--ink-dim); max-width: 56ch; font-size: 14.5px; line-height: 1.5; }
+
+  .summary-strip { display: flex; gap: 22px; flex-wrap: wrap; }
+  .summary-strip .stat { min-width: 84px; }
+  .summary-strip .stat-num { display: block; font-size: 26px; font-weight: 600; color: var(--ink); line-height: 1; }
+  .summary-strip .stat-label { display: block; margin-top: 5px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); }
+
+  /* ---- filters ---- */
+  .filters {
+    max-width: 1360px;
+    margin: 0 auto 30px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px 28px;
+    align-items: center;
+  }
+  .filter-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .filter-group .fg-label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); margin-right: 2px; }
+  .chip {
+    appearance: none; border: 1px solid var(--line); background: var(--panel);
+    color: var(--ink-dim); font: inherit; font-size: 12.5px; padding: 6px 12px;
+    border-radius: 100px; cursor: pointer; transition: border-color .15s, color .15s, background .15s;
+  }
+  .chip:hover { border-color: var(--signal-dim); color: var(--ink); }
+  .chip[aria-pressed="true"] {
+    background: var(--signal); border-color: var(--signal); color: #06201e; font-weight: 600;
+  }
+  .result-count { font-size: 12.5px; color: var(--ink-faint); margin-left: auto; }
+
+  /* ---- branch sections ---- */
+  main { max-width: 1360px; margin: 0 auto; }
+  section.branch { margin-bottom: 40px; }
+  section.branch[hidden] { display: none; }
+  .branch-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+  .branch-head h2 { margin: 0; font-size: 18px; font-weight: 600; }
+  .branch-head .branch-note { font-size: 12.5px; color: var(--ink-faint); }
+  .branch-head .branch-count { margin-left: auto; font-size: 12px; color: var(--ink-faint); }
+
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: 14px;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    transition: border-color .15s, transform .15s;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+  }
+  .card:hover { border-color: var(--signal-dim); transform: translateY(-1px); }
+  .card:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+  .card[hidden] { display: none; }
+
+  .card-map-wrap { display: flex; justify-content: center; background: var(--void-2); border-radius: 6px; padding: 8px; }
+  .card-name { font-size: 13.5px; font-weight: 600; line-height: 1.3; }
+  .card-key { font-size: 11px; color: var(--signal); }
+  .card-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 10.5px; }
+  .tag {
+    padding: 2px 7px; border-radius: 5px; background: var(--panel-2); color: var(--ink-dim);
+    border: 1px solid var(--line-soft); white-space: nowrap;
+  }
+  .tag.mode-pvp { color: var(--joiner); border-color: color-mix(in srgb, var(--joiner) 40%, var(--line-soft)); }
+  .tag.imbalance { color: var(--hazard); border-color: color-mix(in srgb, var(--hazard) 40%, var(--line-soft)); }
+  .tag.zone-custom { color: var(--signal); border-color: color-mix(in srgb, var(--signal) 40%, var(--line-soft)); }
+  .card-stats { display: flex; gap: 14px; font-size: 11px; color: var(--ink-faint); }
+  .card-stats b { color: var(--ink); font-weight: 600; }
+
+  /* ---- svg minimap ---- */
+  svg.minimap { display: block; }
+  .cell-open { fill: var(--void-2); }
+  .cell-hard { fill: var(--hard); }
+  .cell-soft { fill: var(--soft); }
+  .cell-hazard { fill: var(--hazard); }
+  .zone-creator { fill: var(--creator); opacity: 0.10; }
+  .zone-joiner { fill: var(--joiner); opacity: 0.10; }
+  .scoring-dot { fill: var(--gold); }
+  .spawn-dot { fill: var(--spawn); }
+  .grid-frame { fill: none; stroke: var(--line); stroke-width: 1; }
+
+  /* ---- modal ---- */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: color-mix(in srgb, var(--void) 78%, transparent);
+    backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center;
+    padding: 20px; z-index: 50;
+  }
+  .modal-backdrop[hidden] { display: none; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    max-width: 760px; width: 100%; max-height: calc(100vh - 40px); overflow-y: auto;
+    padding: 26px;
+  }
+  .modal-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 4px; }
+  .modal-top h3 { margin: 0; font-size: 22px; }
+  .modal-key { font-size: 12.5px; color: var(--signal); margin: 2px 0 0; }
+  .modal-close {
+    appearance: none; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink-dim);
+    width: 32px; height: 32px; border-radius: 8px; cursor: pointer; font-size: 16px; line-height: 1; flex: none;
+  }
+  .modal-close:hover { color: var(--ink); border-color: var(--signal-dim); }
+  .modal-body { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 18px; }
+  .modal-map { flex: none; background: var(--void-2); border-radius: 8px; padding: 14px; }
+  .modal-side { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 16px; }
+  .modal-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+  .modal-stats .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-faint); }
+  .modal-stats .v { font-size: 14px; margin-top: 2px; text-transform: capitalize; }
+  .legend { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--ink-dim); }
+  .legend-row { display: flex; align-items: center; gap: 8px; }
+  .swatch { width: 13px; height: 13px; border-radius: 3px; flex: none; }
+
+  footer.page-footer { max-width: 1360px; margin: 30px auto 0; color: var(--ink-faint); font-size: 12px; border-top: 1px solid var(--line-soft); padding-top: 16px; }
+
+  @media (max-width: 480px) {
+    .modal-body { flex-direction: column; }
+    .modal-map { align-self: center; }
+  }
+</style>
+
+<header class="top">
+  <div class="title-block">
+    <p class="eyebrow">Phase 7 · Content Review</p>
+    <h1>Void Tactics Atlas</h1>
+    <p>Every generated combat map — terrain, objectives and AI deployment — for the campaign, roguelike and PvP rosters. Nothing here is live yet; this is the review pass before any of it ships.</p>
+  </div>
+  <div class="summary-strip" id="summary"></div>
+</header>
+
+<div class="filters" id="filters"></div>
+
+<main id="branches"></main>
+
+<footer class="page-footer">
+  <span class="mono">17×11 grid</span> · hard cover blocks line of sight and movement · soft cover blocks line of sight only · hazard tiles block movement only · gold marks are scoring objectives · violet marks are AI fleet spawns.
+</footer>
+
+<div class="modal-backdrop" id="modalBackdrop" hidden>
+  <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
+</div>
+
+<script>
+const GRID_W = 17, GRID_H = 11;
+
+const BRANCH_DEFS = [
+  { id: "spine", label: "Main Spine", note: "m01–m15, the required campaign path", test: k => /^m\d\d$/.test(k) },
+  { id: "dead-end", label: "Dead Ends", note: "d01–d06, optional side fights", test: k => /^d\d\d$/.test(k) },
+  { id: "shortcut", label: "Shortcuts", note: "s01–s03, risk/reward branches", test: k => /^s\d\d$/.test(k) },
+  { id: "finale", label: "Finale", note: "f01–f06, post-spine endgame", test: k => /^f\d\d$/.test(k) },
+  { id: "roguelike", label: "Roguelike Approach", note: "rl*, every roguelike Combat node now has its own dedicated map, none shared with the campaign", test: k => /^rl/.test(k) },
+  { id: "pvp", label: "PvP Contracts", note: "pvp01–pvp05, new — none existed before this pass", test: k => /^pvp/.test(k) },
+];
+
+const ARCHETYPES = ["asteroidField", "debrisRing", "trenchRun", "twinPillars", "reactorCore", "openVoid"];
+const ARCHETYPE_LABEL = {
+  asteroidField: "Asteroid Field", debrisRing: "Debris Ring", trenchRun: "Trench Run",
+  twinPillars: "Twin Pillars", reactorCore: "Reactor Core", openVoid: "Open Void",
+};
+const SYMMETRY_LABEL = { vertical: "Vertical", horizontal: "Horizontal", radial: "Radial", none: "Asymmetric" };
+const BALANCE_LABEL = { fair: "Fair", favorAttacker: "Favors Attacker", favorDefender: "Favors Defender" };
+
+let DATA = [];
+let activeMode = "all";
+let activeArchetype = "all";
+let activeBranch = "all";
+
+const ZONE_SHAPE_LABEL = { vertical: "Vertical", horizontal: "Horizontal", diagonal: "Diagonal" };
+
+function key(p) { return p.row + "," + p.col; }
+
+function defaultBand(minCol, maxCol) {
+  const out = [];
+  for (let r = 0; r < GRID_H; r++) for (let c = minCol; c <= maxCol; c++) out.push({ row: r, col: c });
+  return out;
+}
+
+// pvp04 is the hand-built exemplar, imported as-is rather than generated --
+// its zoneShape label is a generator placeholder (see difficulty-table.ts),
+// not something that actually shaped its (empty) zone arrays, so the
+// displayed label is derived from the real data instead of trusted blindly.
+function zoneLabel(map) {
+  if (!map.creatorZone.length && !map.joinerZone.length) return "Vertical (default)";
+  return ZONE_SHAPE_LABEL[map.zoneShape] || "Custom";
+}
+
+function minimapSVG(map, cellSize) {
+  const w = GRID_W * cellSize, h = GRID_H * cellSize;
+  const blocked = new Set(map.blocked.map(key));
+  const impassable = new Set(map.impassable.map(key));
+  const scoring = new Map(map.scoring.map(s => [key(s), s]));
+  const spawns = new Set((map.formationPositions || []).map(key));
+  let rects = "";
+  for (let r = 0; r < GRID_H; r++) {
+    for (let c = 0; c < GRID_W; c++) {
+      const k = r + "," + c;
+      const x = c * cellSize, y = r * cellSize;
+      let cls = "cell-open";
+      if (blocked.has(k) && impassable.has(k)) cls = "cell-hard";
+      else if (blocked.has(k)) cls = "cell-soft";
+      else if (impassable.has(k)) cls = "cell-hazard";
+      rects += `<rect class="${cls}" x="${x}" y="${y}" width="${cellSize}" height="${cellSize}"/>`;
+    }
+  }
+  // Deployment zones: an empty array means "use the engine default" (the
+  // full 4-column band), a populated one is this map's actual custom shape
+  // -- rendered as individual cells either way, not a fixed rectangle.
+  const creatorCells = map.creatorZone.length ? map.creatorZone : defaultBand(0, 3);
+  const joinerCells = map.joinerZone.length ? map.joinerZone : defaultBand(13, 16);
+  for (const p of creatorCells) {
+    rects += `<rect class="zone-creator" x="${p.col*cellSize}" y="${p.row*cellSize}" width="${cellSize}" height="${cellSize}"/>`;
+  }
+  for (const p of joinerCells) {
+    rects += `<rect class="zone-joiner" x="${p.col*cellSize}" y="${p.row*cellSize}" width="${cellSize}" height="${cellSize}"/>`;
+  }
+  const r = Math.max(1.6, cellSize * 0.24);
+  for (const [k, s] of scoring) {
+    const [row, col] = k.split(",").map(Number);
+    const cx = col * cellSize + cellSize / 2, cy = row * cellSize + cellSize / 2;
+    rects += `<circle class="scoring-dot" cx="${cx}" cy="${cy}" r="${r}"/>`;
+  }
+  for (const k of spawns) {
+    const [row, col] = k.split(",").map(Number);
+    const cx = col * cellSize + cellSize / 2, cy = row * cellSize + cellSize / 2;
+    rects += `<rect class="spawn-dot" x="${cx - r}" y="${cy - r}" width="${r*2}" height="${r*2}" transform="rotate(45 ${cx} ${cy})"/>`;
+  }
+  rects += `<rect class="grid-frame" x="0.5" y="0.5" width="${w-1}" height="${h-1}"/>`;
+  return `<svg class="minimap" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${rects}</svg>`;
+}
+
+function branchOf(k) {
+  return BRANCH_DEFS.find(b => b.test(k)) || BRANCH_DEFS[0];
+}
+
+function renderSummary() {
+  const total = DATA.length;
+  const pve = DATA.filter(m => m.mode === "PvE").length;
+  const pvp = total - pve;
+  const archCount = new Set(DATA.map(m => m.archetype)).size;
+  const imbalanced = DATA.filter(m => m.symmetryMode === "none").length;
+  const customZones = DATA.filter(m => m.creatorZone.length || m.joinerZone.length).length;
+  document.getElementById("summary").innerHTML = [
+    ["" + total, "Maps"],
+    ["" + pve, "PvE"],
+    ["" + pvp, "PvP"],
+    ["" + archCount, "Archetypes"],
+    ["" + imbalanced, "Asymmetric"],
+    ["" + customZones, "Custom Zones"],
+  ].map(([n, l]) => `<div class="stat"><span class="stat-num mono">${n}</span><span class="stat-label">${l}</span></div>`).join("");
+}
+
+function renderFilters() {
+  const el = document.getElementById("filters");
+  const modeChips = ["all", "PvE", "PvP"].map(m =>
+    `<button class="chip" data-kind="mode" data-value="${m}" aria-pressed="${m === activeMode}">${m === "all" ? "All modes" : m}</button>`
+  ).join("");
+  const branchChips = ["all", ...BRANCH_DEFS.map(b => b.id)].map(id => {
+    const label = id === "all" ? "All branches" : BRANCH_DEFS.find(b => b.id === id).label;
+    return `<button class="chip" data-kind="branch" data-value="${id}" aria-pressed="${id === activeBranch}">${label}</button>`;
+  }).join("");
+  const archChips = ["all", ...ARCHETYPES].map(a => {
+    const label = a === "all" ? "All archetypes" : ARCHETYPE_LABEL[a];
+    return `<button class="chip" data-kind="archetype" data-value="${a}" aria-pressed="${a === activeArchetype}">${label}</button>`;
+  }).join("");
+  el.innerHTML = `
+    <div class="filter-group"><span class="fg-label">Mode</span>${modeChips}</div>
+    <div class="filter-group"><span class="fg-label">Branch</span>${branchChips}</div>
+    <div class="filter-group"><span class="fg-label">Archetype</span>${archChips}</div>
+    <div class="result-count mono" id="resultCount"></div>
+  `;
+  el.querySelectorAll(".chip").forEach(btn => btn.addEventListener("click", onFilterClick));
+}
+
+function onFilterClick(e) {
+  const { kind, value } = e.currentTarget.dataset;
+  if (kind === "mode") activeMode = value;
+  if (kind === "branch") activeBranch = value;
+  if (kind === "archetype") activeArchetype = value;
+  renderFilters();
+  applyFilters();
+}
+
+function matches(map) {
+  if (activeMode !== "all" && map.mode !== activeMode) return false;
+  if (activeArchetype !== "all" && map.archetype !== activeArchetype) return false;
+  if (activeBranch !== "all" && branchOf(map.key).id !== activeBranch) return false;
+  return true;
+}
+
+function applyFilters() {
+  let visible = 0;
+  BRANCH_DEFS.forEach(b => {
+    const section = document.getElementById("branch-" + b.id);
+    let sectionVisible = 0;
+    section.querySelectorAll(".card").forEach(card => {
+      const map = DATA.find(m => m.key === card.dataset.key);
+      const show = matches(map);
+      card.hidden = !show;
+      if (show) { sectionVisible++; visible++; }
+    });
+    section.hidden = sectionVisible === 0;
+    section.querySelector(".branch-count").textContent = sectionVisible + " shown";
+  });
+  document.getElementById("resultCount").textContent = visible + " / " + DATA.length + " maps";
+}
+
+function cardHTML(map) {
+  const covered = map.blocked.length + map.impassable.length;
+  const modeTag = map.mode === "PvP" ? `<span class="tag mode-pvp">PvP</span>` : `<span class="tag">PvE</span>`;
+  const imbalanceTag = map.symmetryMode === "none"
+    ? `<span class="tag imbalance">${BALANCE_LABEL[map.balanceIntent]}</span>`
+    : `<span class="tag">${SYMMETRY_LABEL[map.symmetryMode]}</span>`;
+  const zoneLbl = zoneLabel(map);
+  const zoneTag = zoneLbl === "Vertical (default)" ? "" : `<span class="tag zone-custom">${zoneLbl} zone</span>`;
+  return `
+    <button class="card" data-key="${map.key}">
+      <div class="card-map-wrap">${minimapSVG(map, 6)}</div>
+      <div>
+        <div class="card-name">${map.name}</div>
+        <div class="card-key mono">${map.key}</div>
+      </div>
+      <div class="card-meta">
+        ${modeTag}
+        <span class="tag">${ARCHETYPE_LABEL[map.archetype]}</span>
+        ${imbalanceTag}
+        ${zoneTag}
+      </div>
+      <div class="card-stats mono">
+        <span><b>${covered}</b> cover</span>
+        <span><b>${map.scoring.length}</b> objectives</span>
+        ${map.mode === "PvE" ? `<span><b>${map.rosterSize}</b> roster</span>` : ""}
+      </div>
+    </button>
+  `;
+}
+
+function renderBranches() {
+  const main = document.getElementById("branches");
+  main.innerHTML = BRANCH_DEFS.map(b => {
+    const maps = DATA.filter(m => branchOf(m.key).id === b.id);
+    if (maps.length === 0) return "";
+    return `
+      <section class="branch" id="branch-${b.id}">
+        <div class="branch-head">
+          <h2>${b.label}</h2>
+          <span class="branch-note">${b.note}</span>
+          <span class="branch-count mono"></span>
+        </div>
+        <div class="card-grid">${maps.map(cardHTML).join("")}</div>
+      </section>
+    `;
+  }).join("");
+  main.querySelectorAll(".card").forEach(card => card.addEventListener("click", () => openModal(card.dataset.key)));
+}
+
+function legendRow(colorVar, label) {
+  return `<div class="legend-row"><span class="swatch" style="background:var(${colorVar})"></span>${label}</div>`;
+}
+
+function openModal(mapKey) {
+  const map = DATA.find(m => m.key === mapKey);
+  const covered = map.blocked.length + map.impassable.length;
+  const hard = map.blocked.filter(p => map.impassable.some(i => i.row === p.row && i.col === p.col)).length;
+  document.getElementById("modal").innerHTML = `
+    <div class="modal-top">
+      <div>
+        <h3>${map.name}</h3>
+        <p class="modal-key mono">${map.key} · ${map.mode}</p>
+      </div>
+      <button class="modal-close" id="modalClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-map">${minimapSVG(map, 22)}</div>
+      <div class="modal-side">
+        <div class="modal-stats">
+          <div><div class="k">Archetype</div><div class="v">${ARCHETYPE_LABEL[map.archetype]}</div></div>
+          <div><div class="k">Symmetry</div><div class="v">${SYMMETRY_LABEL[map.symmetryMode]}</div></div>
+          <div><div class="k">Balance</div><div class="v">${BALANCE_LABEL[map.balanceIntent]}</div></div>
+          <div><div class="k">Formation</div><div class="v">${map.mode === "PvE" ? map.formation : "—"}</div></div>
+          <div><div class="k">Deployment zone</div><div class="v">${zoneLabel(map)}</div></div>
+          <div><div class="k">Cover cells</div><div class="v mono">${covered} (${hard} hard)</div></div>
+          <div><div class="k">Objectives</div><div class="v mono">${map.scoring.length}</div></div>
+          ${map.mode === "PvE" ? `<div><div class="k">AI roster</div><div class="v mono">${map.rosterSize} ships</div></div>` : ""}
+        </div>
+        <div class="legend">
+          ${legendRow("--hard", "Hard cover — blocks LOS & movement")}
+          ${legendRow("--soft", "Soft cover — blocks LOS only")}
+          ${legendRow("--hazard", "Hazard — blocks movement only")}
+          ${legendRow("--gold", "Scoring objective")}
+          ${legendRow("--spawn", "AI fleet spawn")}
+          ${legendRow("--creator", "Creator deployment zone")}
+          ${legendRow("--joiner", "Joiner deployment zone")}
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById("modalClose").addEventListener("click", closeModal);
+  document.getElementById("modalBackdrop").hidden = false;
+}
+function closeModal() { document.getElementById("modalBackdrop").hidden = true; }
+document.getElementById("modalBackdrop").addEventListener("click", e => { if (e.target.id === "modalBackdrop") closeModal(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+
+async function boot() {
+  const res = await fetch("gallery-data.json");
+  DATA = await res.json();
+  renderSummary();
+  renderFilters();
+  renderBranches();
+  applyFilters();
+}
+boot();
+</script>

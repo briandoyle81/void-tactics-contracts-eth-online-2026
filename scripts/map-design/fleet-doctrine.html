@@ -1,0 +1,669 @@
+<title>Fleet Doctrine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --void: #0a0d12;
+    --void-2: #10141b;
+    --panel: #161b24;
+    --panel-2: #1c2230;
+    --line: #29313d;
+    --line-soft: #1f2530;
+    --ink: #e9edf2;
+    --ink-dim: #94a1ae;
+    --ink-faint: #59636e;
+    --v1: #46c2e0;
+    --v1-dim: #1f4a56;
+    --v1-tint: #17313a;
+    --v2: #e0902f;
+    --v2-dim: #5e3f1d;
+    --v2-tint: #362415;
+    --heal: #57c98a;
+    --heal-dim: #1f3d2d;
+    --danger: #e2654a;
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --void: #eef1f5;
+      --void-2: #e6eaf0;
+      --panel: #ffffff;
+      --panel-2: #f4f6f9;
+      --line: #d7dee6;
+      --line-soft: #e3e8ee;
+      --ink: #161b22;
+      --ink-dim: #57626d;
+      --ink-faint: #8b96a1;
+      --v1: #0f7f9c;
+      --v1-dim: #cfeef5;
+      --v1-tint: #e3f6fa;
+      --v2: #a15c14;
+      --v2-dim: #f3e2cc;
+      --v2-tint: #faf0e0;
+      --heal: #1f8a55;
+      --heal-dim: #dcf3e6;
+      --danger: #b8402a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --void: #0a0d12; --void-2: #10141b; --panel: #161b24; --panel-2: #1c2230;
+    --line: #29313d; --line-soft: #1f2530; --ink: #e9edf2; --ink-dim: #94a1ae;
+    --ink-faint: #59636e; --v1: #46c2e0; --v1-dim: #1f4a56; --v1-tint: #17313a;
+    --v2: #e0902f; --v2-dim: #5e3f1d; --v2-tint: #362415;
+    --heal: #57c98a; --heal-dim: #1f3d2d; --danger: #e2654a;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--void);
+    color: var(--ink);
+    padding-inline: 20px;
+    padding-block: 24px calc(48px + env(safe-area-inset-bottom, 0px));
+  }
+  h1, h2, h3, .display { font-family: "Rajdhani", ui-sans-serif, sans-serif; letter-spacing: 0.01em; }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+  header.top {
+    max-width: 1280px;
+    margin: 0 auto 26px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px 32px;
+    align-items: flex-end;
+    justify-content: space-between;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--line);
+  }
+  .title-block .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 10px;
+  }
+  .title-block h1 { margin: 0 0 6px; font-size: clamp(28px, 4vw, 40px); font-weight: 700; text-wrap: balance; }
+  .title-block p { margin: 0; color: var(--ink-dim); max-width: 58ch; font-size: 14.5px; line-height: 1.55; }
+
+  .summary-strip { display: flex; gap: 22px; flex-wrap: wrap; }
+  .summary-strip .stat { min-width: 78px; }
+  .summary-strip .stat-num { display: block; font-size: 25px; font-weight: 600; color: var(--ink); line-height: 1; }
+  .summary-strip .stat-label { display: block; margin-top: 5px; font-size: 10.5px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-faint); }
+
+  main { max-width: 1280px; margin: 0 auto; }
+
+  /* faction switcher */
+  .faction-tabs { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+  .faction-tab {
+    flex: 1 1 260px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 18px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+    color: var(--ink);
+    transition: border-color .15s, background .15s;
+  }
+  .faction-tab:hover { border-color: var(--ink-faint); }
+  .faction-tab .ftab-glyph {
+    width: 40px; height: 40px; flex: none; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--panel-2); border: 1px solid var(--line);
+  }
+  .faction-tab .ftab-glyph svg { width: 22px; height: 22px; }
+  .faction-tab .ftab-name { font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 17px; line-height: 1.2; }
+  .faction-tab .ftab-role { font-size: 12px; color: var(--ink-dim); margin-top: 2px; }
+  .faction-tab[data-active="true"][data-fac="1"] { border-color: var(--v1); background: var(--v1-tint); }
+  .faction-tab[data-active="true"][data-fac="1"] .ftab-glyph { background: var(--v1-dim); border-color: var(--v1); color: var(--v1); }
+  .faction-tab[data-active="true"][data-fac="1"] .ftab-name { color: var(--v1); }
+  .faction-tab[data-active="true"][data-fac="2"] { border-color: var(--v2); background: var(--v2-tint); }
+  .faction-tab[data-active="true"][data-fac="2"] .ftab-glyph { background: var(--v2-dim); border-color: var(--v2); color: var(--v2); }
+  .faction-tab[data-active="true"][data-fac="2"] .ftab-name { color: var(--v2); }
+
+  .faction-panel[hidden] { display: none; }
+
+  /* identity row */
+  .identity-row {
+    display: flex; flex-wrap: wrap; gap: 20px 32px; align-items: flex-end;
+    margin-bottom: 20px; padding-bottom: 18px; border-bottom: 1px solid var(--line-soft);
+  }
+  .identity-role { font-size: clamp(22px, 3vw, 30px); font-weight: 700; margin: 0 0 4px; }
+  .identity-tagline { margin: 0; color: var(--ink-dim); font-size: 13.5px; max-width: 52ch; }
+  .identity-pills { display: flex; gap: 10px; flex-wrap: wrap; margin-left: auto; }
+  .pill {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+    padding: 7px 12px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line);
+    min-width: 70px;
+  }
+  .pill .pill-num { font-size: 17px; font-weight: 600; }
+  .pill .pill-label { font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-faint); }
+
+  /* doctrine box */
+  .doctrine-box {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 26px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 20px 28px;
+  }
+  .doctrine-box h3 {
+    margin: 0 0 10px; font-size: 13px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink-faint); font-family: "IBM Plex Mono", monospace; font-weight: 500;
+  }
+  .doctrine-box .prose { font-size: 13.5px; line-height: 1.6; color: var(--ink-dim); margin: 0; }
+  .doctrine-box .prose b { color: var(--ink); font-weight: 600; }
+  .doctrine-list { margin: 0; padding: 0; list-style: none; counter-reset: step; }
+  .doctrine-list li {
+    counter-increment: step; position: relative; padding-left: 26px; margin-bottom: 9px;
+    font-size: 13.5px; line-height: 1.5; color: var(--ink-dim);
+  }
+  .doctrine-list li::before {
+    content: counter(step); position: absolute; left: 0; top: 0.5px;
+    width: 18px; height: 18px; border-radius: 5px; background: var(--panel-2); border: 1px solid var(--line);
+    color: var(--ink-faint); font-family: "IBM Plex Mono", monospace; font-size: 10.5px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .doctrine-list li b { color: var(--ink); font-weight: 600; }
+  .special-rules { margin: 0; padding: 0; list-style: none; }
+  .special-rules li { font-size: 13px; line-height: 1.55; color: var(--ink-dim); margin-bottom: 8px; }
+  .special-rules li b { color: var(--ink); font-weight: 600; }
+  @media (max-width: 720px) { .doctrine-box { grid-template-columns: 1fr; } }
+
+  /* archetype grid */
+  .archetype-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+    margin-bottom: 8px;
+  }
+  .arch-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px 14px; }
+  .arch-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .arch-glyph { width: 34px; height: 34px; flex: none; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; }
+  .arch-glyph svg { width: 19px; height: 19px; }
+  .arch-name { font-size: 18px; font-weight: 700; line-height: 1.1; }
+  .arch-tag { font-size: 12px; color: var(--ink-faint); margin-top: 1px; }
+  .arch-tree { margin: 0 0 14px; padding: 0; list-style: none; counter-reset: t; }
+  .arch-tree li {
+    counter-increment: t; position: relative; padding-left: 20px; margin-bottom: 6px;
+    font-size: 12.8px; line-height: 1.5; color: var(--ink-dim);
+  }
+  .arch-tree li::before {
+    content: counter(t) "."; position: absolute; left: 0; color: var(--ink-faint);
+    font-family: "IBM Plex Mono", monospace; font-size: 11px;
+  }
+  .arch-tree li b { color: var(--ink); font-weight: 600; }
+
+  .tier-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--line-soft); }
+  table.tiers { width: 100%; border-collapse: collapse; font-size: 11.8px; min-width: 460px; }
+  table.tiers th, table.tiers td { padding: 6px 8px; text-align: left; white-space: nowrap; }
+  table.tiers thead th {
+    background: var(--panel-2); color: var(--ink-faint); font-family: "IBM Plex Mono", monospace;
+    font-weight: 500; font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  table.tiers tbody tr:not(:last-child) td { border-bottom: 1px solid var(--line-soft); }
+  table.tiers td.tier-num { font-family: "IBM Plex Mono", monospace; color: var(--ink-faint); }
+  table.tiers td.gear { color: var(--ink-dim); }
+  table.tiers td.gear .gun { color: var(--ink); }
+  table.tiers td.special-cell.has-special { font-weight: 500; }
+  table.tiers td.num { font-family: "IBM Plex Mono", monospace; text-align: right; }
+  table.tiers td.cost-cell { min-width: 92px; }
+  .cost-bar-track { position: relative; height: 6px; border-radius: 3px; background: var(--line-soft); overflow: hidden; margin-bottom: 3px; }
+  .cost-bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: 3px; }
+  .cost-num { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--ink-faint); }
+
+  /* field notes table */
+  .fieldnotes { margin-top: 26px; }
+  .fieldnotes h3 {
+    margin: 0 0 4px; font-size: 13px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink-faint); font-family: "IBM Plex Mono", monospace; font-weight: 500;
+  }
+  .fieldnotes p.sub { margin: 0 0 12px; font-size: 12.5px; color: var(--ink-faint); }
+  .fieldnotes-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+  table.field { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 620px; }
+  table.field th, table.field td { padding: 9px 12px; text-align: left; }
+  table.field thead th {
+    background: var(--panel-2); color: var(--ink-faint); font-family: "IBM Plex Mono", monospace;
+    font-weight: 500; font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+    border-bottom: 1px solid var(--line);
+  }
+  table.field tbody tr:not(:last-child) td { border-bottom: 1px solid var(--line-soft); }
+  table.field tbody tr:nth-child(even) { background: var(--panel); }
+  table.field td.win { font-family: "IBM Plex Mono", monospace; }
+
+  .v2-no-ram {
+    margin-top: 18px; padding: 12px 16px; border: 1px dashed var(--line);
+    border-radius: 8px; font-size: 12.5px; color: var(--ink-faint); line-height: 1.5;
+  }
+
+  footer.page-footer { max-width: 1280px; margin: 34px auto 0; color: var(--ink-faint); font-size: 12px; border-top: 1px solid var(--line-soft); padding-top: 16px; }
+</style>
+
+<header class="top">
+  <div class="title-block">
+    <p class="eyebrow">Single-Player &amp; Roguelike AI</p>
+    <h1>Fleet Doctrine</h1>
+    <p>Every seeded AI ship config and behavior tree for Void Tactics' two factions — what each ship carries, and the exact priority order its AI checks on its turn.</p>
+  </div>
+  <div class="summary-strip" id="summary"></div>
+</header>
+
+<main>
+  <div class="faction-tabs" id="factionTabs"></div>
+  <div id="panels"></div>
+</main>
+
+<footer class="page-footer">
+  <span class="mono">acc/hull/spd</span> are trait tiers 0–2, added to the faction's base stats · <span class="mono">DR</span> is damage reduction from equipped armor/shields · behavior trees are checked top to bottom, first match wins, fallback is Pass.
+</footer>
+
+<script>
+const FACTIONS = {
+  1: {
+    name: "Variant I", role: "Skirmisher", short: "v1",
+    tagline: "Light, fast, long-range — stands off and kites rather than trading blows.",
+    baseHull: 100, baseSpeed: 4, rangeBand: "2–6",
+    kit: [
+      { name: "Ram", kind: "innate", note: "hunts 0-HP enemies" },
+      { name: "Repair Drones", kind: "heal", note: "slot 2, Support" },
+      { name: "EMP", kind: "attack", note: "slot 1, Aggressor" },
+      { name: "Flak Array", kind: "attack", note: "slot 3, Grunt/Turtle" },
+    ],
+    doctrine: {
+      title: "Ram on an objective — checked first, every archetype",
+      prose: "If an enemy is <b>at 0 HP and standing on a scoring tile</b>, and this ship can reach a free tile within Ram's range this turn, it moves there and rams — evicting the enemy and taking the tile — before doing anything else on its tree below. Requires its own <b>reactor timer ≤ 1</b> (each ram adds a tick; three destroys it). Only the Rammer archetype also hunts a downed enemy that isn't on a scoring tile."
+    },
+    specialRules: [
+      { name: "Flak Array", text: "Hits <b>every</b> ship in range, allies included — used only with no ally in range, and only for 2+ enemies or 1 the gun can't reach (e.g. blocked line of sight)." },
+      { name: "EMP", text: "Finishes an adjacent enemy whose reactor timer is already ≥ 2." },
+    ],
+    archetypes: [
+      {
+        key: "grunt", name: "Grunt", tag: "Stands off at maximum range",
+        tree: [
+          "Out of range → step in only as far as maximum range",
+          "Inside range → back away toward maximum range",
+          "Act from there — <b>won't</b> abandon a scoring tile to kite",
+        ],
+        ships: [
+          { tier: "I", gun: "Laser", gear: "Light shields", special: "—", traits: "0/0/0", hull: 100, dmg: 50, range: 3, move: 5, dr: 15, cost: 85 },
+          { tier: "II", gun: "Laser", gear: "Light shields", special: "—", traits: "1/1/1", hull: 110, dmg: 50, range: 3, move: 6, dr: 15, cost: 115 },
+          { tier: "III", gun: "Laser", gear: "Light shields", special: "Flak Array", traits: "2/1/1", hull: 110, dmg: 50, range: 4, move: 6, dr: 15, cost: 145 },
+          { tier: "IV", gun: "Laser", gear: "Medium shields", special: "Flak Array", traits: "2/2/1", hull: 120, dmg: 50, range: 4, move: 5, dr: 30, cost: 170 },
+          { tier: "V", gun: "Laser", gear: "Heavy shields", special: "Flak Array", traits: "2/2/2", hull: 120, dmg: 50, range: 4, move: 5, dr: 45, cost: 195 },
+        ],
+      },
+      {
+        key: "aggressor", name: "Aggressor", tag: "Presses the fight",
+        tree: [
+          "Closes to maximum range",
+          "Never backs off, unlike Grunt/Sniper",
+        ],
+        ships: [
+          { tier: "I", gun: "Missile Launcher", gear: "Light shields", special: "—", traits: "0/1/1", hull: 110, dmg: 60, range: 4, move: 5, dr: 15, cost: 120 },
+          { tier: "II", gun: "Missile Launcher", gear: "Light shields", special: "—", traits: "1/2/2", hull: 120, dmg: 60, range: 5, move: 6, dr: 15, cost: 160 },
+          { tier: "III", gun: "Missile Launcher", gear: "Light shields", special: "—", traits: "2/2/2", hull: 120, dmg: 60, range: 6, move: 6, dr: 15, cost: 175 },
+          { tier: "IV", gun: "Missile Launcher", gear: "Medium shields", special: "—", traits: "2/2/2", hull: 120, dmg: 60, range: 6, move: 5, dr: 30, cost: 185 },
+          { tier: "V", gun: "Missile Launcher", gear: "Heavy shields", special: "EMP", traits: "2/2/2", hull: 120, dmg: 60, range: 6, move: 4, dr: 45, cost: 205 },
+        ],
+      },
+      {
+        key: "sniper", name: "Sniper", tag: "Strictest kiter",
+        tree: [
+          "Same rule as Grunt, at longer range",
+          "<b>Will</b> leave a scoring tile to keep its range",
+        ],
+        ships: [
+          { tier: "I", gun: "Railgun", gear: "Light shields", special: "—", traits: "1/0/0", hull: 100, dmg: 40, range: 7, move: 5, dr: 15, cost: 100 },
+          { tier: "II", gun: "Railgun", gear: "Light shields", special: "—", traits: "2/1/1", hull: 110, dmg: 40, range: 9, move: 6, dr: 15, cost: 135 },
+          { tier: "III", gun: "Railgun", gear: "Light shields", special: "—", traits: "2/2/2", hull: 120, dmg: 40, range: 9, move: 7, dr: 15, cost: 165 },
+          { tier: "IV", gun: "Railgun", gear: "Medium shields", special: "—", traits: "2/2/2", hull: 120, dmg: 40, range: 9, move: 6, dr: 30, cost: 175 },
+          { tier: "V", gun: "Railgun", gear: "Heavy shields", special: "—", traits: "2/2/2", hull: 120, dmg: 40, range: 9, move: 5, dr: 45, cost: 185 },
+        ],
+      },
+      {
+        key: "support", name: "Support", tag: "Heals with Repair Drones",
+        tree: [
+          "Moves just far enough to bring the most injured ally (0 HP first) into range",
+          "Heals",
+          "Else: shoot / hold or seek a tile / stay near an injured ally",
+        ],
+        ships: [
+          { tier: "I", gun: "Laser", gear: "Light shields", special: "Repair Drones", traits: "0/0/0", hull: 100, dmg: 50, range: 3, move: 5, dr: 15, cost: 105 },
+          { tier: "II", gun: "Laser", gear: "Light shields", special: "Repair Drones", traits: "1/1/1", hull: 110, dmg: 50, range: 3, move: 6, dr: 15, cost: 135 },
+          { tier: "III", gun: "Laser", gear: "Light shields", special: "Repair Drones", traits: "2/2/2", hull: 120, dmg: 50, range: 4, move: 7, dr: 15, cost: 180 },
+          { tier: "IV", gun: "Laser", gear: "Medium shields", special: "Repair Drones", traits: "2/2/2", hull: 120, dmg: 50, range: 4, move: 6, dr: 30, cost: 190 },
+          { tier: "V", gun: "Laser", gear: "Heavy shields", special: "Repair Drones", traits: "2/2/2", hull: 120, dmg: 50, range: 4, move: 5, dr: 45, cost: 200 },
+        ],
+      },
+      {
+        key: "turtle", name: "Turtle", tag: "Holds objectives",
+        tree: [
+          "Seeks and holds a scoring tile",
+          "Fights only opportunistically from it",
+          "Lays Flak from its tile when it pays off",
+        ],
+        ships: [
+          { tier: "I", gun: "Laser", gear: "Light armor", special: "—", traits: "0/1/0", hull: 110, dmg: 50, range: 3, move: 4, dr: 15, cost: 90 },
+          { tier: "II", gun: "Laser", gear: "Light armor", special: "—", traits: "1/2/1", hull: 120, dmg: 50, range: 3, move: 5, dr: 15, cost: 125 },
+          { tier: "III", gun: "Laser", gear: "Medium armor", special: "Flak Array", traits: "2/2/1", hull: 120, dmg: 50, range: 4, move: 4, dr: 30, cost: 160 },
+          { tier: "IV", gun: "Laser", gear: "Medium armor", special: "Flak Array", traits: "2/2/2", hull: 120, dmg: 50, range: 4, move: 5, dr: 30, cost: 175 },
+          { tier: "V", gun: "Laser", gear: "Heavy armor", special: "Flak Array", traits: "2/2/2", hull: 120, dmg: 50, range: 4, move: 4, dr: 45, cost: 180 },
+        ],
+      },
+      {
+        key: "rammer", name: "Rammer", tag: "Hunts downed enemies anywhere", note: "Faction 1 only",
+        tree: [
+          "Downed enemy anywhere (not just on a tile) → moves adjacent and Rams — only while reactor timer ≤ 1",
+          "Otherwise fights like a Grunt",
+        ],
+        ships: [
+          { tier: "I", gun: "Laser", gear: "Light shields", special: "—", traits: "0/1/2", hull: 110, dmg: 50, range: 3, move: 7, dr: 15, cost: 120 },
+          { tier: "II", gun: "Laser", gear: "Medium shields", special: "—", traits: "1/2/2", hull: 120, dmg: 50, range: 3, move: 6, dr: 30, cost: 155 },
+        ],
+      },
+    ],
+    fieldnotes: {
+      title: "In the field — the roguelike's first three missions",
+      sub: "Rosters retuned to introduce the variant 1 kit gradually. Win rates are a random variant-1 fleet at the 500-cost starting cap, 400 simulated battles — a floor, not a prediction.",
+      rows: [
+        { mission: "1", node: "m01", roster: "grunt, aggressor, sniper", intro: "skirmishers that kite", win: "94%" },
+        { mission: "2", node: "m02", roster: "grunt II, aggressor II, sniper II", intro: "the same, tougher", win: "59%" },
+        { mission: "3", node: "m03", roster: "grunt, aggressor II, sniper, support", intro: "a healer (Repair Drones)", win: "41%" },
+        { mission: "3", node: "d01", roster: "grunt, aggressor, turtle II, rammer", intro: "tile-holding and Ram", win: "43%" },
+        { mission: "3", node: "s01", roster: "grunt, aggressor II, sniper II, rammer", intro: "the risky shortcut", win: "15%" },
+      ],
+    },
+  },
+  2: {
+    name: "Variant II", role: "Brawler", short: "v2",
+    tagline: "Heavy, slow, short-range and tough — advances and trades blows in armor.",
+    baseHull: 125, baseSpeed: 3, rangeBand: "1–7",
+    kit: [
+      { name: "Repair", kind: "heal", note: "innate, range 1" },
+      { name: "Electric Storm", kind: "attack", note: "slot 1, Aggressor" },
+      { name: "Drone Swarm", kind: "attack", note: "slot 2, Grunt/Turtle" },
+      { name: "Aux Engine", kind: "passive", note: "slot 3, heaviest tiers" },
+    ],
+    doctrine: {
+      title: "Shared priority order — every archetype, before its own tree",
+      list: [
+        "<b>Repair</b> an injured or disabled friendly on a scoring tile (disabled first, then lowest HP; never itself)",
+        "<b>Claim a scoring tile</b> — stay on the one it stands on, else head for the nearest unclaimed one at full speed",
+        "<b>Repair a disabled (0 HP)</b> friendly within reach of where it ends up (a holder won't leave its tile for this)",
+        "Its own archetype tree, below — only reached when there's no unclaimed tile and it isn't holding one",
+        "Last resort: repair itself or any injured friendly in range, only if nothing above gave it an action",
+      ],
+    },
+    specialRules: [
+      { name: "Drone Swarm", text: "Range 5, ignores line of sight — used only when no gun target is in range." },
+      { name: "Electric Storm", text: "Ticks the reactor timer of <b>every</b> ship in range, allies included — used only to finish downed enemies, only when safe (own timer ≤ 1, no ally near destruction, no more allies caught than enemies finished)." },
+    ],
+    archetypes: [
+      {
+        key: "v2grunt", name: "Grunt", tag: "Shoots, holds, or advances",
+        tree: [
+          "Shoot if anything's in gun range",
+          "Else hold a scoring tile it stands on",
+          "Else advance at full speed, stop adjacent, shoot — reach with Drone Swarm if the gun still can't",
+        ],
+        ships: [
+          { tier: "I", gun: "Medium Mining Laser", gear: "Light armor", special: "—", traits: "0/0/0", hull: 125, dmg: 60, range: 2, move: 3, dr: 20, cost: 80 },
+          { tier: "II", gun: "Medium Mining Laser", gear: "Light armor", special: "—", traits: "1/1/1", hull: 137, dmg: 60, range: 2, move: 4, dr: 20, cost: 110 },
+          { tier: "III", gun: "Medium Mining Laser", gear: "Light armor", special: "Drone Swarm", traits: "2/2/1", hull: 150, dmg: 60, range: 3, move: 4, dr: 20, cost: 160 },
+          { tier: "IV", gun: "Medium Mining Laser", gear: "Medium armor", special: "Drone Swarm", traits: "2/2/1", hull: 150, dmg: 60, range: 3, move: 3, dr: 40, cost: 165 },
+          { tier: "V", gun: "Medium Mining Laser", gear: "Heavy armor", special: "Aux Engine", traits: "2/2/2", hull: 150, dmg: 60, range: 3, move: 5, dr: 60, cost: 175 },
+        ],
+      },
+      {
+        key: "v2aggressor", name: "Aggressor", tag: "Pure pursuit",
+        tree: [
+          "Same as Grunt, but never stops to hold a tile",
+        ],
+        ships: [
+          { tier: "I", gun: "Mining Drill", gear: "Light armor", special: "—", traits: "0/1/1", hull: 137, dmg: 95, range: 1, move: 4, dr: 20, cost: 115 },
+          { tier: "II", gun: "Mining Drill", gear: "Light armor", special: "—", traits: "1/2/2", hull: 150, dmg: 95, range: 1, move: 5, dr: 20, cost: 155 },
+          { tier: "III", gun: "Mining Drill", gear: "Light armor", special: "—", traits: "2/2/2", hull: 150, dmg: 95, range: 1, move: 5, dr: 20, cost: 170 },
+          { tier: "IV", gun: "Mining Drill", gear: "Medium armor", special: "Electric Storm", traits: "2/2/2", hull: 150, dmg: 95, range: 1, move: 4, dr: 40, cost: 190 },
+          { tier: "V", gun: "Mining Drill", gear: "Heavy armor", special: "Aux Engine", traits: "2/2/2", hull: 150, dmg: 95, range: 1, move: 5, dr: 60, cost: 190 },
+        ],
+      },
+      {
+        key: "v2sniper", name: "Sniper", tag: "Fire support",
+        tree: [
+          "Shoots in place — never retreats, slow ships can't run",
+          "Otherwise closes only as far as maximum range",
+        ],
+        ships: [
+          { tier: "I", gun: "Linear Accelerator", gear: "Light shields", special: "—", traits: "1/0/0", hull: 125, dmg: 50, range: 6, move: 4, dr: 20, cost: 100 },
+          { tier: "II", gun: "Linear Accelerator", gear: "Light shields", special: "—", traits: "2/1/1", hull: 137, dmg: 50, range: 7, move: 5, dr: 20, cost: 135 },
+          { tier: "III", gun: "Linear Accelerator", gear: "Light shields", special: "—", traits: "2/2/2", hull: 150, dmg: 50, range: 7, move: 6, dr: 20, cost: 165 },
+          { tier: "IV", gun: "Linear Accelerator", gear: "Medium shields", special: "—", traits: "2/2/2", hull: 150, dmg: 50, range: 7, move: 5, dr: 40, cost: 175 },
+          { tier: "V", gun: "Linear Accelerator", gear: "Heavy shields", special: "Aux Engine", traits: "2/2/2", hull: 150, dmg: 50, range: 7, move: 6, dr: 60, cost: 195 },
+        ],
+      },
+      {
+        key: "v2support", name: "Support", tag: "Storms, then shadows the hurt",
+        tree: [
+          "Storm if safe",
+          "Shoot if anything's in range",
+          "Else shadow the most injured ally, moving just far enough to repair it — equipped specials are never used to heal",
+        ],
+        ships: [
+          { tier: "I", gun: "Medium Mining Laser", gear: "Light shields", special: "—", traits: "0/0/0", hull: 125, dmg: 60, range: 2, move: 4, dr: 20, cost: 85 },
+          { tier: "II", gun: "Medium Mining Laser", gear: "Light shields", special: "—", traits: "1/1/1", hull: 137, dmg: 60, range: 2, move: 5, dr: 20, cost: 115 },
+          { tier: "III", gun: "Medium Mining Laser", gear: "Light shields", special: "—", traits: "2/2/2", hull: 150, dmg: 60, range: 3, move: 6, dr: 20, cost: 160 },
+          { tier: "IV", gun: "Medium Mining Laser", gear: "Medium shields", special: "—", traits: "2/2/2", hull: 150, dmg: 60, range: 3, move: 5, dr: 40, cost: 170 },
+          { tier: "V", gun: "Medium Mining Laser", gear: "Heavy shields", special: "Aux Engine", traits: "2/2/2", hull: 150, dmg: 60, range: 3, move: 6, dr: 60, cost: 190 },
+        ],
+      },
+      {
+        key: "v2turtle", name: "Turtle", tag: "Holds objectives",
+        tree: [
+          "Seeks and holds a scoring tile",
+          "Reaches with Drone Swarm when its gun can't",
+        ],
+        ships: [
+          { tier: "I", gun: "Medium Mining Laser", gear: "Light armor", special: "—", traits: "0/1/0", hull: 137, dmg: 60, range: 2, move: 3, dr: 20, cost: 90 },
+          { tier: "II", gun: "Medium Mining Laser", gear: "Light armor", special: "—", traits: "1/2/1", hull: 150, dmg: 60, range: 2, move: 4, dr: 20, cost: 125 },
+          { tier: "III", gun: "Medium Mining Laser", gear: "Medium armor", special: "Drone Swarm", traits: "1/2/2", hull: 150, dmg: 60, range: 2, move: 4, dr: 40, cost: 165 },
+          { tier: "IV", gun: "Medium Mining Laser", gear: "Medium armor", special: "Drone Swarm", traits: "2/2/2", hull: 150, dmg: 60, range: 3, move: 4, dr: 40, cost: 180 },
+          { tier: "V", gun: "Medium Mining Laser", gear: "Heavy armor", special: "Drone Swarm", traits: "2/2/2", hull: 150, dmg: 60, range: 3, move: 2, dr: 60, cost: 185 },
+        ],
+      },
+    ],
+  },
+};
+
+const COST_CEILING = 215;
+
+function el(html) {
+  const t = document.createElement("template");
+  t.innerHTML = html.trim();
+  return t.content.firstElementChild;
+}
+
+function glyphFor(key) {
+  const g = {
+    grunt: '<circle cx="12" cy="12" r="7"/>',
+    aggressor: '<path d="M12 4 L19 12 L12 20 L12 14 L5 14 L5 10 L12 10 Z"/>',
+    sniper: '<circle cx="12" cy="12" r="7"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/>',
+    support: '<circle cx="12" cy="12" r="8"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>',
+    turtle: '<path d="M12 3 L20 7 V13 C20 18 16.5 21 12 22 C7.5 21 4 18 4 13 V7 Z"/>',
+    rammer: '<path d="M3 12 L15 12 M11 5 L20 12 L11 19"/>',
+  };
+  const body = g[key] || g.grunt;
+  const filled = key === "grunt" || key === "turtle";
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">${body}</svg>`;
+}
+
+function factionGlyph(fac) {
+  return fac === "1"
+    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 L15 9 L21 10 L16.5 14.3 L17.7 20.5 L12 17.3 L6.3 20.5 L7.5 14.3 L3 10 L9 9 Z"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="9" width="16" height="11" rx="1.5"/><path d="M8 9 V6 a4 4 0 0 1 8 0 v3"/></svg>';
+}
+
+function specialClass(kit, name) {
+  if (name === "—") return "";
+  const entry = kit.find((k) => k.name === name);
+  return entry && entry.kind === "heal" ? "heal-text" : "";
+}
+
+function tierRow(ship, fac, kit) {
+  const pct = Math.min(100, Math.round((ship.cost / COST_CEILING) * 100));
+  const specCls = specialClass(kit, ship.special);
+  return `
+    <tr>
+      <td class="tier-num">${ship.tier}</td>
+      <td class="gear"><span class="gun">${ship.gun}</span> · ${ship.gear}</td>
+      <td class="special-cell ${ship.special !== "—" ? "has-special" : ""} ${specCls}">${ship.special}</td>
+      <td class="num">${ship.traits}</td>
+      <td class="num">${ship.hull}</td>
+      <td class="num">${ship.dmg}</td>
+      <td class="num">${ship.range}</td>
+      <td class="num">${ship.move}</td>
+      <td class="num">${ship.dr}%</td>
+      <td class="cost-cell">
+        <div class="cost-bar-track"><div class="cost-bar-fill" style="width:${pct}%; background:var(--v${fac})"></div></div>
+        <span class="cost-num">${ship.cost}</span>
+      </td>
+    </tr>`;
+}
+
+function archCardHTML(arch, fac, kit) {
+  return `
+    <div class="arch-card">
+      <div class="arch-head">
+        <div class="arch-glyph" style="color:var(--v${fac})">${glyphFor(arch.key.replace(/^v2/, ""))}</div>
+        <div>
+          <div class="arch-name">${arch.name}${arch.note ? ` <span style="font-size:11px;color:var(--ink-faint);font-weight:500;">— ${arch.note}</span>` : ""}</div>
+          <div class="arch-tag">${arch.tag}</div>
+        </div>
+      </div>
+      <ol class="arch-tree">${arch.tree.map((t) => `<li>${t}</li>`).join("")}</ol>
+      <div class="tier-wrap">
+        <table class="tiers">
+          <thead><tr>
+            <th>Tier</th><th>Gear</th><th>Special</th><th>acc/hull/spd</th>
+            <th>HP</th><th>Dmg</th><th>Rng</th><th>Mov</th><th>DR</th><th>Cost</th>
+          </tr></thead>
+          <tbody>${arch.ships.map((s) => tierRow(s, fac, kit)).join("")}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function doctrineHTML(fac, doctrine) {
+  if (doctrine.list) {
+    return `
+      <div>
+        <h3>${doctrine.title}</h3>
+        <ol class="doctrine-list">${doctrine.list.map((d) => `<li>${d}</li>`).join("")}</ol>
+      </div>`;
+  }
+  return `
+    <div>
+      <h3>${doctrine.title}</h3>
+      <p class="prose">${doctrine.prose}</p>
+    </div>`;
+}
+
+function panelHTML(fac, data) {
+  const specialRulesHTML = `
+    <div>
+      <h3>Special-weapon rules</h3>
+      <ul class="special-rules">${data.specialRules.map((s) => `<li><b>${s.name}:</b> ${s.text}</li>`).join("")}</ul>
+    </div>`;
+
+  const kitPills = data.kit.map((k) => {
+    const cls = k.kind === "heal" ? "heal-text" : "";
+    return `<div class="pill"><span class="pill-num ${cls}" style="font-size:13px;${cls ? "" : `color:var(--v${fac})`}">${k.name}</span><span class="pill-label">${k.note}</span></div>`;
+  }).join("");
+
+  const grid = data.archetypes.map((a) => archCardHTML(a, fac, data.kit)).join("");
+
+  const field = data.fieldnotes ? `
+    <div class="fieldnotes">
+      <h3>${data.fieldnotes.title}</h3>
+      <p class="sub">${data.fieldnotes.sub}</p>
+      <div class="fieldnotes-wrap">
+        <table class="field">
+          <thead><tr><th>Mission</th><th>Node</th><th>Roster</th><th>Introduces</th><th>Sim. win rate</th></tr></thead>
+          <tbody>${data.fieldnotes.rows.map((r) => `<tr><td>${r.mission}</td><td class="mono">${r.node}</td><td>${r.roster}</td><td>${r.intro}</td><td class="win">${r.win}</td></tr>`).join("")}</tbody>
+        </table>
+      </div>
+    </div>` : `
+    <div class="v2-no-ram">No Ram — this faction has no Ram ability, so a Variant 2 ship tagged Rammer (none are currently seeded) would default to Grunt behavior.</div>`;
+
+  return `
+    <section class="faction-panel" data-fac="${fac}" ${fac === "2" ? "hidden" : ""}>
+      <div class="identity-row">
+        <div>
+          <div class="identity-role" style="color:var(--v${fac})">${data.name} · ${data.role}</div>
+          <p class="identity-tagline">${data.tagline}</p>
+        </div>
+        <div class="identity-pills">
+          <div class="pill"><span class="pill-num">${data.baseHull}</span><span class="pill-label">Base hull</span></div>
+          <div class="pill"><span class="pill-num">${data.baseSpeed}</span><span class="pill-label">Base speed</span></div>
+          <div class="pill"><span class="pill-num">${data.rangeBand}</span><span class="pill-label">Gun range</span></div>
+          <div class="pill"><span class="pill-num">${data.archetypes.length}</span><span class="pill-label">Archetypes</span></div>
+        </div>
+      </div>
+      <div class="doctrine-box">
+        ${doctrineHTML(fac, data.doctrine)}
+        ${specialRulesHTML}
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:20px;">${kitPills}</div>
+      <div class="archetype-grid">${grid}</div>
+      ${field}
+    </section>`;
+}
+
+function renderSummary() {
+  const factionCount = Object.keys(FACTIONS).length;
+  const archCount = Object.values(FACTIONS).reduce((n, f) => n + f.archetypes.length, 0);
+  const shipCount = Object.values(FACTIONS).reduce((n, f) => n + f.archetypes.reduce((m, a) => m + a.ships.length, 0), 0);
+  const roleCount = new Set(Object.values(FACTIONS).flatMap((f) => f.archetypes.map((a) => a.name))).size;
+  document.getElementById("summary").innerHTML = [
+    [String(factionCount), "Factions"],
+    [String(roleCount), "Roles"],
+    [String(archCount), "Behavior Trees"],
+    [String(shipCount), "Ship Configs"],
+  ].map(([n, l]) => `<div class="stat"><span class="stat-num mono">${n}</span><span class="stat-label">${l}</span></div>`).join("");
+}
+
+function renderTabs() {
+  const wrap = document.getElementById("factionTabs");
+  wrap.innerHTML = Object.entries(FACTIONS).map(([fac, d]) => `
+    <button class="faction-tab" data-fac="${fac}" data-active="${fac === "1"}">
+      <span class="ftab-glyph" style="color:${fac === "1" ? "var(--v1)" : "var(--v2)"}">${factionGlyph(fac)}</span>
+      <span>
+        <div class="ftab-name">${d.name}</div>
+        <div class="ftab-role">${d.role} · ${d.archetypes.length} archetypes, ${d.archetypes.reduce((n, a) => n + a.ships.length, 0)} configs</div>
+      </span>
+    </button>`).join("");
+  wrap.querySelectorAll(".faction-tab").forEach((btn) => btn.addEventListener("click", () => setFaction(btn.dataset.fac)));
+}
+
+function setFaction(fac) {
+  document.querySelectorAll(".faction-tab").forEach((btn) => btn.dataset.active = String(btn.dataset.fac === fac));
+  document.querySelectorAll(".faction-panel").forEach((p) => p.hidden = p.dataset.fac !== fac);
+}
+
+function renderPanels() {
+  const wrap = document.getElementById("panels");
+  wrap.innerHTML = Object.entries(FACTIONS).map(([fac, d]) => panelHTML(fac, d)).join("");
+}
+
+renderSummary();
+renderTabs();
+renderPanels();
+</script>
+<style>
+  .heal-text { color: var(--heal) !important; }
+</style>

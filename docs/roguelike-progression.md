@@ -2,6 +2,8 @@
 
 **Written: 2026-09-21.** Describes the roguelike campaign's enemy progression as seeded by `ignition/modules/DeployAndConfig.ts` from `ignition/data/roguelikeStarterContent.json`. Re-verify against those files if they have changed since.
 
+**Update (2026-09-23):** the map-redesign pass gave every roguelike Combat node its own dedicated map (not just the first five) — see "How it is built" below, rewritten for this. The mission → variant rule itself, and everything under "Things to know", are unaffected.
+
 ## The rule
 
 **The first three missions on any path fight variant 1 ships. Every later mission fights variant 2.**
@@ -19,13 +21,14 @@ The player's side is unchanged: the roguelike campaign requires variant 1 ships 
 
 ## How it is built
 
-The roguelike graph shares its map layouts with the NodeMap (single-player) campaign, but enemy rosters are attached **per map id** (`AIEncounters.setMapPlacements`), and the campaign's 30 maps use variant 2 rosters. Changing those would change the campaign too, so the five early missions get their **own maps**:
+Enemy rosters are attached **per map id** (`AIEncounters.setMapPlacements`), and every roguelike Combat node now has its **own dedicated map** — `roguelikeStarterContent.json`'s `maps` holds 30 entries (`rlM01`…`rlM15`, `rlD01`…`rlD06`, `rlS01`…`rlS03`, `rlF01`…`rlF06`), one per Combat node, each with its own generated terrain (never the campaign's raw blocked/scoring tile data — that stopped being shared in the 2026-09-23 map-redesign pass). `nodes[].mapKey` points every Combat node at its own `rl*` map uniformly.
 
-- `roguelikeStarterContent.json` has `maps` (`rlM01`, `rlM02`, `rlM03`, `rlD01`, `rlS01`) — exact clones of the campaign maps `m01`, `m02`, `m03`, `d01`, `s01` (same blocked tiles, scoring tiles, mode) — and `mapPlacements` for them: spawn positions taken from the campaign map's, with rosters designed for variant 1 (they started as the variant 2 originals with each `v2…` config swapped for its variant 1 counterpart, then were retuned to introduce the variant 1 kit and smooth the difficulty ramp — see `docs/ai-ship-configs.md`).
-- The five matching nodes' `mapKey` points at those maps; every other node still uses a campaign map.
-- The deploy module seeds these maps in the **same chained sequence** as the campaign maps, appended after them (ids 31–35). Map ids are computed from array position, so keeping the chain unbroken matters (see the Ignition execution-order note in `CLAUDE.md`).
+**Terrain is always dedicated; roster composition is not always distinct:**
+- The first five missions (`rlM01`, `rlM02`, `rlM03`, `rlD01`, `rlS01` — mission ≤ 3 on any path) have their **own hand-designed variant 1 rosters** (they started as the variant 2 originals with each `v2…` config swapped for its variant 1 counterpart, then retuned to introduce the variant 1 kit and smooth the difficulty ramp — see `docs/ai-ship-configs.md`).
+- Every other roguelike map (mission 4+) **copies its campaign counterpart's exact roster** (`configKeys` — same ships, same variant 2 rosters) at generation time, placed on the new dedicated terrain via the same formation logic. This is a deliberate "same difficulty, different battlefield" design choice, not leftover sharing — the two `mapPlacements` entries are independent on-chain data from this point on (retuning one doesn't retune the other), they just started identical.
+- The deploy module seeds all 30 roguelike maps chained after the 30 campaign maps (ids 31–60), then the 5 PvP-only maps (ids 61–65, not attached to any node). Map ids are computed from array position, so keeping the chain unbroken matters (see the Ignition execution-order note in `CLAUDE.md`).
 
-The NodeMap campaign is untouched (all 30 of its maps are still variant 2).
+The NodeMap campaign's own 30 maps are a separate, independent set of map ids (1–30) — nothing about the roguelike's map-dedication pass touches them structurally (their terrain changed too, but as part of the same map-redesign pass, not because of anything roguelike-specific).
 
 ## Things to know
 
@@ -37,7 +40,7 @@ The NodeMap campaign is untouched (all 30 of its maps are still variant 2).
 ## Changing the progression
 
 - **Different number of variant 1 missions:** the graph and rosters are data. Re-point the affected nodes' `mapKey` in `roguelikeStarterContent.json` to variant 1 (or variant 2) maps, adding `maps` / `mapPlacements` entries as needed. `test/RoguelikeProgression.test.ts` has a `VARIANT_1_MISSIONS` constant that must match.
-- **On a live deploy:** use `AIEncounters.setMapPlacements` on the affected map ids (the roguelike-only maps for early missions). Changing a campaign map's placements would change the NodeMap campaign as well.
+- **On a live deploy:** use `AIEncounters.setMapPlacements` on the affected roguelike map id directly — every roguelike map has its own id and its own placement data now, independent of its campaign counterpart (see "How it is built"), so this never touches the NodeMap campaign.
 
 ## Verification
 

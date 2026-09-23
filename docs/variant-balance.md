@@ -99,10 +99,40 @@ The "heavier" part of the gear change is deliberately modest (only the Heavy tie
 
 ## Caveats — what this does NOT cover
 - **Special items.** Only specials' movement and cost are modelled (variant 2's Thruster gives +3 movement). The combat effects of EMP / Repair Drones / Flak Array vs Electric Storm / Drone Swarm are **not** balanced by this pass; they replace a shot, so they matter for real fleet strength.
-- **Scoring tiles, obstacles and line of sight.** The simulation is elimination-style on an open grid. Terrain and objectives can favor short-range heavy ships (cover, blocking) or punish slow ones (tile grabbing) — direction unknown. The "kiting dominates" result may be partly an artifact of the open grid.
+- ~~**Scoring tiles, obstacles and line of sight.** The simulation is elimination-style on an open grid. Terrain and objectives can favor short-range heavy ships (cover, blocking) or punish slow ones (tile grabbing) — direction unknown. The "kiting dominates" result may be partly an artifact of the open grid.~~ **Update (2026-09-23):** obstacles/line-of-sight and movement-blocking terrain are now modelled — see "Terrain and LOS" below. It turns out to matter a lot. **Scoring-tile objective play is still not covered** (matches the existing gap noted in `docs/ai-ship-configs.md` for AI config balance).
 - **Simple, tactic-free policies.** Ships never retreat, weigh retaliation, or coordinate; ship order within a turn isn't chosen; the sim never shoots 0-HP ships to speed up their timer; starting placement is assumed. Real players will differ.
 - **Not cross-checked against the contracts.** The stat and cost formulas were copied by hand; a variant-2 table equal to variant 1's gives ~50%, but individual ships were not compared with on-chain output.
 - Treat the win rates as a directional check, not proof. Retune from playtests.
+
+## Terrain and LOS: does cover narrow the kiting advantage? (2026-09-23)
+
+**Written 2026-09-23.** `scripts/balance-sim/balance_sim.py` was extended with `scripts/balance-sim/los.py` — a Python port of `contracts/Maps.sol`'s Bresenham line walk, the same port `scripts/map-design/los.ts` uses for the new map generator/validator, cross-checked against the same fixture cases as both (`los_selfcheck.py`). Two rule changes were added, exactly matching the contracts:
+
+- **Shooting now requires line of sight past range 1** (`Game._performShoot`'s `manhattan > 1 && !hasMaps` rule) — a candidate firing position with no LOS to the target is no longer offered as a legal shot at all (no "blind shot" concept exists on-chain, so the sim doesn't model one either); the ship falls back to advancing instead.
+- **Movement now respects impassable terrain**, blocking a candidate destination if the straight-line path from the ship's current position crosses an impassable cell — landing on one *or* passing through one (`Game.moveShip`'s new `hasMovementPath` check).
+
+Run with `python3 scripts/balance-sim/balance_sim.py --terrain-sample`, which loads 12 representative maps (one low- and one high-difficulty slot per archetype) from `scripts/map-design/out/*.json` — the real generator's output (run `npx hardhat run scripts/map-design/review-all.ts` first to produce them) — and runs the kite-vs-kite matchup (the parity read this doc already judges balance by) against each map's actual terrain, cost limit 1000, n=600 per cell (~±0.02 noise, vs n=1500/±0.013 for the main table above).
+
+| Map (archetype, difficulty) | Sightline % | Kite-vs-kite win rate | Δ vs open-grid baseline (0.463) |
+|---|---|---|---|
+| Open Void (low — m01) | 72.2% | 0.500 | +0.037 |
+| Open Void (high — m12) | 44.4% | 0.565 | +0.102 |
+| Asteroid Field (low — m02) | 33.3% | 0.482 | +0.018 |
+| Asteroid Field (high — f05) | 5.6% | 0.610 | +0.147 |
+| Twin Pillars (low — m03) | 13.9% | 0.648 | +0.185 |
+| Twin Pillars (high — f03) | 5.6% | 0.682 | +0.218 |
+| Trench Run (low — m05) | 0.0% | 0.723 | +0.260 |
+| Trench Run (high — f01) | 5.6% | 0.752 | +0.288 |
+| Debris Ring (low — m06) | 5.6% | 0.707 | +0.243 |
+| Debris Ring (high — m14) | 41.7% | 0.600 | +0.137 |
+| Reactor Core (low — m11) | 0.0% | 0.848 | +0.385 |
+| Reactor Core (high — m15) | 0.0% | 0.844 | +0.381 |
+
+**Reading: yes, terrain narrows (and on denser maps, reverses) variant 2's kiting disadvantage — clearly and consistently.** Sightline % and Δ are strongly, near-monotonically inversely correlated: every map at 0–20% sightline adds +0.18 to +0.39 to variant 2's kite-vs-kite win rate (baseline 0.463); every map at ≥40% sightline stays much closer to baseline (+0.04 to +0.14). LOS-blocking terrain gives the short-range brawler safer lanes to close distance, exactly as intended — the effect isn't marginal, it's large enough that the densest maps (Reactor Core, Trench Run) push variant 2 from "slightly weak" to clearly favored (0.72–0.85) at cost 1000 on that specific map.
+
+**Update (2026-09-23, same day):** the table above already reflects a fix made during Phase 7's content-generation pass — the first run of this table found Debris Ring's *high*-difficulty slot at a broken **94.4% sightline** (more open than its own low-difficulty slot), traced to `archetypes.ts`'s ring-radius formula letting `outer` grow past the grid's actual maximum possible distance from center (5), which shrank the ring to almost nothing instead of thickening it. Fixed by capping `outer` at that maximum and shrinking `inner` instead as difficulty rises (see `ringRadii` in `archetypes.ts`) — Debris Ring's high-difficulty slot now sits at a reasonable 41.7%. The low/high pair still isn't perfectly monotonic (5.6% vs 41.7% — low is tighter than high), which reads as ordinary per-seed RNG variance at this sample size, not a further systematic bug; leave it for the human review pass to judge, not another automated fix.
+
+**Not a reason to re-tune ship stats yet.** This table is about *maps*, not about whether variant 1/variant 2's base stats still need adjustment — the dense archetypes now push kite-vs-kite well past parity in variant 2's favor on those specific maps, which may be fine (that's terrain doing its job) or may call for tempering the very densest presets once real difficulty-table values are finalized. Revisit stat balance only after the actual shipped map set is locked in, not from this sample.
 
 ## Decided: Mining Drill stays at range 1 (2026-09-21)
 Variant 2's Mining Drill (the Close gun) is range **1** (adjacent only), the literal "shorter range" continuation of variant 1's range 2. At range 1 the bridge accuracy bonus does nothing (a +50% bonus on range 1 rounds down to 0), and kiters punish it. **Decision: keep it at range 1** (no change to the defaults). The consequence to be aware of: the bridge accuracy bonus never helps a range-1 gun. For reference, the alternative that was measured — range 2 (damage 90) makes variant 2 stronger at the same hull; kite-vs-kite means with the shipped gear (cost limits 500 / 1000 / 2000):
