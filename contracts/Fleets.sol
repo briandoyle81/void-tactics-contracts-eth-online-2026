@@ -6,10 +6,17 @@ import "./Types.sol";
 import "./IShips.sol";
 import "./IFleets.sol";
 import "./IShipAttributes.sol";
+import "./IMaps.sol";
 
 contract Fleets is Ownable, IFleets {
     IShips public ships;
     IShipAttributes public shipAttributes;
+    // Optional: used by createFleet to validate starting positions against a
+    // map's own deployment zone (see isValidDeploymentTile). Unset (or
+    // _mapId == 0, e.g. the synthetic placeholder fleets RoguelikeMatch/
+    // RoguelikeResupply mint) falls back to the historical hardcoded column
+    // rule below, unchanged.
+    IMaps public maps;
     // Contracts (e.g. Lobbies, SinglePlayerMatch) authorized to manage
     // fleets, mirroring Game.isAllowedToStartGames. Widened from a single
     // lobbiesAddress so more than one orchestrator can create/clear fleets
@@ -59,6 +66,10 @@ contract Fleets is Ownable, IFleets {
         shipAttributes = IShipAttributes(_shipAttributes);
     }
 
+    function setMapsAddress(address _maps) public onlyOwner {
+        maps = IMaps(_maps);
+    }
+
     // Lets a future ShipsRouter (or any other IShips-compatible facade) be
     // swapped in without redeploying this contract — see Game.sol's
     // setAddresses for why this matters (AIShips' id offset has finite
@@ -73,7 +84,8 @@ contract Fleets is Ownable, IFleets {
         uint[] calldata _shipIds,
         Position[] calldata _startingPositions,
         uint _costLimit,
-        bool _isCreator
+        bool _isCreator,
+        uint _mapId
     ) external returns (uint) {
         if (!isAllowedToManageFleets[msg.sender])
             revert NotAllowedToManageFleets();
@@ -82,37 +94,12 @@ contract Fleets is Ownable, IFleets {
         if (_shipIds.length != _startingPositions.length)
             revert ArrayLengthMismatch();
 
-        // Validate positions based on whether this is creator or joiner fleet, and
-        // check for duplicates in the same pass (I-09: these used to be two
-        // separate loops over the same array with no dependency between them).
-        // O(n), all in memory, no storage writes. Use bitset for 17×11 grid (187
-        // positions max).
-        uint256[2] memory positionBitset; // 2 * 256 = 512 bits > 187 positions
-        for (uint i = 0; i < _startingPositions.length; i++) {
-            Position memory pos = _startingPositions[i];
-
-            if (_isCreator) {
-                // Creator ships must be in columns 0-3 (first 4 columns)
-                if (pos.col < 0 || pos.col > 3) revert InvalidPosition();
-            } else {
-                // Joiner ships must be in columns 13-16 (last 4 columns)
-                if (pos.col < 13 || pos.col > 16) revert InvalidPosition();
-            }
-
-            // Validate row bounds (0-10 for 11 rows)
-            if (pos.row < 0 || pos.row > 10) revert InvalidPosition();
-
-            // Convert position to single key: row * GRID_WIDTH + col
-            uint256 key = uint256(int256(pos.row)) *
-                17 +
-                uint256(int256(pos.col));
-            uint256 wordIndex = key / 256;
-            uint256 bitIndex = key % 256;
-            if ((positionBitset[wordIndex] & (1 << bitIndex)) != 0) {
-                revert DuplicatePosition();
-            }
-            positionBitset[wordIndex] |= (1 << bitIndex);
-        }
+        // Split into its own function purely to relieve legacy-codegen
+        // stack pressure — createFleet's own frame was already close to its
+        // limit before the _mapId param was added, and this validation
+        // step's own locals (the bitset, per-position loop vars) don't need
+        // to stay live for the rest of createFleet once it returns.
+        _validateStartingPositions(_startingPositions, _isCreator, _mapId);
 
         uint totalCost = 0;
         fleetCount++;
@@ -173,6 +160,66 @@ contract Fleets is Ownable, IFleets {
 
         emit FleetCreated(fleetId, _lobbyId, _owner);
         return fleetId;
+    }
+
+    // Validates each starting position is (a) legal for this side's
+    // deployment zone and (b) not a duplicate. Checks for duplicates in the
+    // same pass as the zone check (I-09: these used to be two separate
+    // loops over the same array with no dependency between them). O(n), all
+    // in memory, no storage writes. Bitset for the 17x11 grid (187
+    // positions max — 2 * 256 = 512 bits is ample).
+    //
+    // A real map to validate deployment positions against, or not: 0 is the
+    // shared "no map" sentinel (matches Maps.sol's own MapNotFound
+    // convention and Lobbies.selectedMapId==0's "no preset map" meaning) —
+    // used here for RoguelikeMatch/RoguelikeResupply's synthetic placeholder
+    // fleets, which have no real map at all. An unwired `maps` address
+    // falls back the same way, so this never becomes a hard dependency on
+    // deploy wiring order.
+    function _validateStartingPositions(
+        Position[] calldata _startingPositions,
+        bool _isCreator,
+        uint _mapId
+    ) private view {
+        bool useMapZones = _mapId != 0 && address(maps) != address(0);
+        uint256[2] memory positionBitset;
+        for (uint i = 0; i < _startingPositions.length; i++) {
+            Position memory pos = _startingPositions[i];
+
+            if (useMapZones) {
+                // Map-specific deployment zone (falls back to the same
+                // default column band internally if this map has no custom
+                // zone configured for this side — see isValidDeploymentTile).
+                if (
+                    !maps.isValidDeploymentTile(
+                        _mapId,
+                        pos.row,
+                        pos.col,
+                        _isCreator
+                    )
+                ) revert InvalidPosition();
+            } else if (_isCreator) {
+                // Creator ships must be in columns 0-3 (first 4 columns)
+                if (pos.col < 0 || pos.col > 3) revert InvalidPosition();
+            } else {
+                // Joiner ships must be in columns 13-16 (last 4 columns)
+                if (pos.col < 13 || pos.col > 16) revert InvalidPosition();
+            }
+
+            // Validate row bounds (0-10 for 11 rows)
+            if (pos.row < 0 || pos.row > 10) revert InvalidPosition();
+
+            // Convert position to single key: row * GRID_WIDTH + col
+            uint256 key = uint256(int256(pos.row)) *
+                17 +
+                uint256(int256(pos.col));
+            uint256 wordIndex = key / 256;
+            uint256 bitIndex = key % 256;
+            if ((positionBitset[wordIndex] & (1 << bitIndex)) != 0) {
+                revert DuplicatePosition();
+            }
+            positionBitset[wordIndex] |= (1 << bitIndex);
+        }
     }
 
     function clearFleet(uint _fleetId) external {

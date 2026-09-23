@@ -10,7 +10,8 @@ interface IFleets {
         uint[] calldata _shipIds,
         Position[] calldata _startingPositions,
         uint _costLimit,
-        bool _isCreator
+        bool _isCreator,
+        uint _mapId
     ) external returns (uint);
 
     function clearFleet(uint _fleetId) external;

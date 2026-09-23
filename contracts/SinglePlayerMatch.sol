@@ -208,7 +208,8 @@ contract SinglePlayerMatch is Ownable, IGameOrchestrator {
             _shipIds,
             _positions,
             node.costLimit,
-            true
+            true,
+            node.mapId
         );
 
         uint aiFleetId = _mintAIFleet(node.mapId, gameId);
@@ -286,7 +287,8 @@ contract SinglePlayerMatch is Ownable, IGameOrchestrator {
             shipIds,
             positions,
             type(uint).max,
-            false
+            false,
+            _mapId
         );
         emit AIFleetCreated(_gameId, fleetId);
     }

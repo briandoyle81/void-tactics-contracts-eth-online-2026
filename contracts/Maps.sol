@@ -26,6 +26,24 @@ contract Maps is Ownable {
     mapping(uint => uint256) private blockedTilesBitmap; // gameId => mask
     mapping(uint => uint256) private presetBlockedMapsBitmap; // mapId => mask
 
+    // Movement-blocking terrain, same bitmask shape as blocked (LOS) above,
+    // but an independent bit: blocked affects only shooting line-of-sight,
+    // impassable affects only movement (see hasMovementPath) — a cell can be
+    // soft cover (blocked, not impassable), a movement hazard (impassable,
+    // not blocked), hard cover (both), or open (neither).
+    mapping(uint => uint256) private impassableTilesBitmap; // gameId => mask
+    mapping(uint => uint256) private presetImpassableMapsBitmap; // mapId => mask
+
+    // Per-map deployment zones: which cells a fleet may start on, keyed by
+    // side. An unset (zero) bitmask means "use the engine-wide default"
+    // (Fleets.sol's historical creator col 0-3 / joiner col 13-16, row 0-10
+    // rule) — see isValidDeploymentTile. A bitmask can never distinguish
+    // "unset" from "deliberately empty," which is fine: an empty deployment
+    // zone would make the map's fleets uncreatable anyway, so collapsing
+    // that case into "use the default" is safe, not a real limitation.
+    mapping(uint => uint256) private presetCreatorZoneBitmap; // mapId => mask
+    mapping(uint => uint256) private presetJoinerZoneBitmap; // mapId => mask
+
     // Mapping: gameId => row => column => scoring
     mapping(uint => mapping(int16 => mapping(int16 => uint8)))
         public scoringTiles;
@@ -59,6 +77,12 @@ contract Maps is Ownable {
     // editable afterward — see Types.sol's MapMode for what enforces this.
     mapping(uint => MapMode) public mapMode;
 
+    // presetMapId => a human-readable/thematic name. Purely descriptive —
+    // no on-chain logic reads this; it exists for FE display. Additive: set
+    // via setMapName after creation, never a creation-function parameter, so
+    // it never touches createFullPresetMap's/createPresetMap's ABI.
+    mapping(uint => string) public mapName;
+
     // Address of the Game contract that can apply preset maps
     address public gameAddress;
 
@@ -72,6 +96,8 @@ contract Maps is Ownable {
     error NotMapEditor();
 
     event MapEditorSet(address indexed editor, bool allowed);
+    event MapNameSet(uint indexed mapId, string name);
+    event DeploymentZoneSet(uint indexed mapId, bool isCreator);
 
     constructor() Ownable(msg.sender) {}
 
@@ -168,6 +194,20 @@ contract Maps is Ownable {
     }
 
     /**
+     * @dev Set (or change) a preset map's display name. Purely descriptive.
+     * @param _mapId The map ID to name
+     * @param _name The name to display for this map
+     */
+    function setMapName(
+        uint _mapId,
+        string calldata _name
+    ) external onlyMapEditor {
+        if (_mapId == 0 || _mapId > mapCount) revert MapNotFound();
+        mapName[_mapId] = _name;
+        emit MapNameSet(_mapId, _name);
+    }
+
+    /**
      * @dev Create a new preset map with both blocked and scoring tiles
      * @param _blockedPositions Array of blocked positions
      * @param _scoringPositions Array of scoring positions with point values
@@ -178,7 +218,12 @@ contract Maps is Ownable {
         ScoringPosition[] memory _scoringPositions,
         MapMode _mode
     ) external onlyMapEditor {
-        _createPresetMapInternal(_blockedPositions, _scoringPositions, _mode);
+        _createPresetMapInternal(
+            _blockedPositions,
+            new Position[](0),
+            _scoringPositions,
+            _mode
+        );
     }
 
     /**
@@ -192,6 +237,7 @@ contract Maps is Ownable {
     ) external onlyMapEditor {
         _createPresetMapInternal(
             _blockedPositions,
+            new Position[](0),
             new ScoringPosition[](0),
             _mode
         );
@@ -206,7 +252,12 @@ contract Maps is Ownable {
         ScoringPosition[] memory _scoringPositions,
         MapMode _mode
     ) external onlyMapEditor {
-        _createPresetMapInternal(new Position[](0), _scoringPositions, _mode);
+        _createPresetMapInternal(
+            new Position[](0),
+            new Position[](0),
+            _scoringPositions,
+            _mode
+        );
     }
 
     /**
@@ -217,27 +268,42 @@ contract Maps is Ownable {
      * tuple array (same reason createPresetScoringMap exists instead of the
      * scoring-only createPresetMap overload — see DeployAndConfig.ts) — so
      * deploy scripts that need to seed both blocked and scoring tiles in one
-     * call must go through this function instead.
-     * @param _blockedPositions Array of blocked positions
+     * call must go through this function instead. This is also the only
+     * creation entry point that accepts impassable-terrain positions — the
+     * other overloads above don't take them (kept untouched deliberately,
+     * to avoid ABI churn on entry points Ignition doesn't actually call).
+     * @param _blockedPositions Array of blocked (LOS-blocking) positions
+     * @param _impassablePositions Array of impassable (movement-blocking)
+     *        positions — independent of _blockedPositions, see
+     *        hasMovementPath
      * @param _scoringPositions Array of scoring positions with point values
      * @param _mode Which game mode(s) this map is valid for
      */
     function createFullPresetMap(
         Position[] memory _blockedPositions,
+        Position[] memory _impassablePositions,
         ScoringPosition[] memory _scoringPositions,
         MapMode _mode
     ) external onlyMapEditor {
-        _createPresetMapInternal(_blockedPositions, _scoringPositions, _mode);
+        _createPresetMapInternal(
+            _blockedPositions,
+            _impassablePositions,
+            _scoringPositions,
+            _mode
+        );
     }
 
     /**
-     * @dev Internal function to create a preset map with both blocked and scoring tiles
+     * @dev Internal function to create a preset map with blocked, impassable,
+     * and scoring tiles
      * @param _blockedPositions Array of blocked positions
+     * @param _impassablePositions Array of impassable positions
      * @param _scoringPositions Array of scoring positions with point values
      * @param _mode Which game mode(s) this map is valid for
      */
     function _createPresetMapInternal(
         Position[] memory _blockedPositions,
+        Position[] memory _impassablePositions,
         ScoringPosition[] memory _scoringPositions,
         MapMode _mode
     ) internal {
@@ -259,6 +325,22 @@ contract Maps is Ownable {
             bitmap = _setBit(bitmap, _bitIndex(pos.row, pos.col));
         }
         presetBlockedMapsBitmap[mapCount] = bitmap;
+
+        // Set impassable positions (independent bitmask, same shape)
+        uint256 impassableBitmap = presetImpassableMapsBitmap[mapCount];
+        for (uint i = 0; i < _impassablePositions.length; i++) {
+            Position memory pos = _impassablePositions[i];
+            if (
+                pos.row < 0 ||
+                pos.row >= GRID_HEIGHT ||
+                pos.col < 0 ||
+                pos.col >= GRID_WIDTH
+            ) {
+                revert InvalidPosition();
+            }
+            impassableBitmap = _setBit(impassableBitmap, _bitIndex(pos.row, pos.col));
+        }
+        presetImpassableMapsBitmap[mapCount] = impassableBitmap;
 
         // Set scoring positions
         for (uint i = 0; i < _scoringPositions.length; i++) {
@@ -432,6 +514,10 @@ contract Maps is Ownable {
         // could run into the millions of gas on a dense map.
         blockedTilesBitmap[_gameId] = presetBlockedMapsBitmap[_mapId];
 
+        // Same full-overwrite copy for impassable terrain, independent of
+        // (and via the same mechanism as) the blocked-tile copy above.
+        impassableTilesBitmap[_gameId] = presetImpassableMapsBitmap[_mapId];
+
         // Get the preset scoring positions and apply them to the game
         _applyPresetScoringToGame(_gameId, _mapId);
     }
@@ -494,6 +580,18 @@ contract Maps is Ownable {
     ) internal view returns (Position[] memory) {
         if (_mapId == 0 || _mapId > mapCount) revert MapNotFound();
         return _unpackBitmap(presetBlockedMapsBitmap[_mapId]);
+    }
+
+    /**
+     * @dev Get a preset map's impassable (movement-blocking) tiles
+     * @param _mapId The map ID
+     * @return Array of impassable positions
+     */
+    function getPresetMapImpassable(
+        uint _mapId
+    ) external view returns (Position[] memory) {
+        if (_mapId == 0 || _mapId > mapCount) revert MapNotFound();
+        return _unpackBitmap(presetImpassableMapsBitmap[_mapId]);
     }
 
     // Reconstructs a Position[] from a blocked-tile bitmask: one pass to
@@ -641,6 +739,29 @@ contract Maps is Ownable {
     }
 
     /**
+     * @dev Set a tile as impassable (movement-blocking) or not, for a
+     * specific game. Independent of setBlockedTile's LOS-blocking flag.
+     * @param _gameId The game ID
+     * @param _row The row coordinate
+     * @param _col The column coordinate
+     * @param _impassable Whether the tile should block movement
+     */
+    function setImpassableTile(
+        uint _gameId,
+        int16 _row,
+        int16 _col,
+        bool _impassable
+    ) external onlyMapEditor {
+        if (_row < 0 || _row >= GRID_HEIGHT || _col < 0 || _col >= GRID_WIDTH) {
+            revert InvalidPosition();
+        }
+        uint idx = _bitIndex(_row, _col);
+        impassableTilesBitmap[_gameId] = _impassable
+            ? _setBit(impassableTilesBitmap[_gameId], idx)
+            : _clearBit(impassableTilesBitmap[_gameId], idx);
+    }
+
+    /**
      * @dev Set a tile as scoring or non-scoring for a specific game
      * @param _gameId The game ID
      * @param _row The row coordinate
@@ -681,6 +802,25 @@ contract Maps is Ownable {
             revert InvalidPosition();
         }
         return _isBitSet(blockedTilesBitmap[_gameId], _bitIndex(_row, _col));
+    }
+
+    /**
+     * @dev Check if a tile is impassable (movement-blocking) for a specific
+     * game. Independent of isTileBlocked (LOS-only).
+     * @param _gameId The game ID
+     * @param _row The row coordinate
+     * @param _col The column coordinate
+     * @return Whether the tile is impassable
+     */
+    function isTileImpassable(
+        uint _gameId,
+        int16 _row,
+        int16 _col
+    ) public view returns (bool) {
+        if (_row < 0 || _row >= GRID_HEIGHT || _col < 0 || _col >= GRID_WIDTH) {
+            revert InvalidPosition();
+        }
+        return _isBitSet(impassableTilesBitmap[_gameId], _bitIndex(_row, _col));
     }
 
     /**
@@ -826,6 +966,57 @@ contract Maps is Ownable {
     }
 
     /**
+     * @dev Check if a ship can move from one point to another without its
+     * path crossing an impassable tile — blocks landing ON an impassable
+     * tile AND passing THROUGH one, via the same straight-line walk hasMaps
+     * uses for line of sight (same permissive-corner rule, applied to the
+     * impassable bitmap instead of the blocked one — one mental model, "an
+     * unobstructed line," used for both shooting and moving). This is a
+     * straight-line approximation, not full pathfinding: a ship can be
+     * denied a destination a real detour could reach within its movement
+     * budget, matching the abstraction level already accepted for LOS.
+     *
+     * Deliberately does NOT apply hasMaps' "start tile counts" rule — a ship
+     * already legitimately standing on a tile must always be able to leave
+     * it, even if that tile is later marked impassable (matches how blocked
+     * tiles already behave for an already-occupied cell elsewhere).
+     * @param _gameId The game ID
+     * @param _row0 Starting row coordinate
+     * @param _col0 Starting column coordinate
+     * @param _row1 Ending row coordinate
+     * @param _col1 Ending column coordinate
+     * @return Whether the path (including the destination) is clear
+     */
+    function hasMovementPath(
+        uint _gameId,
+        int16 _row0,
+        int16 _col0,
+        int16 _row1,
+        int16 _col1
+    ) public view returns (bool) {
+        if (
+            _row0 < 0 ||
+            _row0 >= GRID_HEIGHT ||
+            _col0 < 0 ||
+            _col0 >= GRID_WIDTH ||
+            _row1 < 0 ||
+            _row1 >= GRID_HEIGHT ||
+            _col1 < 0 ||
+            _col1 >= GRID_WIDTH
+        ) revert InvalidPosition();
+
+        if (_row0 == _row1 && _col0 == _col1) {
+            return true; // already there; not a move
+        }
+
+        uint256 bitmap = impassableTilesBitmap[_gameId];
+        // _isTileBlockedSafe is a generic "is this bit set in this bitmap"
+        // helper (see its own comment) — reused here against the impassable
+        // bitmap rather than the blocked one it's named for.
+        return _bresenhamMaps(bitmap, _row0, _col0, _row1, _col1);
+    }
+
+    /**
      * @dev Internal function implementing Bresenham's line of sight algorithm
      * Uses permissive corner mode (only blocks if both flankers are blocked)
      * Optimized to avoid stack too deep errors
@@ -918,8 +1109,10 @@ contract Maps is Ownable {
      * per-tile storage reads) via _unpackBitmap's O(grid size) in-memory
      * scan; scoring tiles are O(configured tiles) via gameScoringPositionSet.
      * @param _gameId The game ID
-     * @return blockedPositions Array of blocked tile positions
+     * @return blockedPositions Array of blocked (LOS-blocking) tile positions
      * @return scoringPositions Array of scoring tile positions
+     * @return impassablePositions Array of impassable (movement-blocking)
+     *         tile positions
      */
     function getGameMapState(
         uint _gameId
@@ -928,11 +1121,13 @@ contract Maps is Ownable {
         view
         returns (
             Position[] memory blockedPositions,
-            ScoringPosition[] memory scoringPositions
+            ScoringPosition[] memory scoringPositions,
+            Position[] memory impassablePositions
         )
     {
         blockedPositions = _unpackBitmap(blockedTilesBitmap[_gameId]);
         scoringPositions = _getGameScoringPositions(_gameId);
+        impassablePositions = _unpackBitmap(impassableTilesBitmap[_gameId]);
     }
 
     /**
@@ -967,5 +1162,137 @@ contract Maps is Ownable {
                 onlyOnceTiles[_gameId][row][col]
             );
         }
+    }
+
+    // ---- Deployment zones ----
+
+    // Mirrors Fleets.sol's historical hardcoded default (creator col 0-3,
+    // joiner col 13-16, row 0-10 — row is the whole grid height, so no
+    // separate row constant is needed) — duplicated here so
+    // isValidDeploymentTile can fall back to it when a map has no custom
+    // zone, matching the existing GRID_WIDTH/GRID_HEIGHT duplication
+    // precedent already between Maps.sol and Game.sol.
+    int16 private constant DEFAULT_CREATOR_MIN_COL = 0;
+    int16 private constant DEFAULT_CREATOR_MAX_COL = 3;
+    int16 private constant DEFAULT_JOINER_MIN_COL = 13;
+    int16 private constant DEFAULT_JOINER_MAX_COL = 16;
+
+    /**
+     * @dev Set (or full-replace) a preset map's creator-side deployment
+     * zone. An empty array clears it back to "use the default."
+     * @param _mapId The map ID
+     * @param _tiles The set of tiles the creator's fleet may start on
+     */
+    function setCreatorZone(
+        uint _mapId,
+        Position[] calldata _tiles
+    ) external onlyMapEditor {
+        if (_mapId == 0 || _mapId > mapCount) revert MapNotFound();
+        uint256 bitmap = 0;
+        for (uint i = 0; i < _tiles.length; i++) {
+            Position calldata pos = _tiles[i];
+            if (
+                pos.row < 0 ||
+                pos.row >= GRID_HEIGHT ||
+                pos.col < 0 ||
+                pos.col >= GRID_WIDTH
+            ) {
+                revert InvalidPosition();
+            }
+            bitmap = _setBit(bitmap, _bitIndex(pos.row, pos.col));
+        }
+        presetCreatorZoneBitmap[_mapId] = bitmap;
+        emit DeploymentZoneSet(_mapId, true);
+    }
+
+    /**
+     * @dev Set (or full-replace) a preset map's joiner-side deployment zone.
+     * @param _mapId The map ID
+     * @param _tiles The set of tiles the joiner's fleet may start on
+     */
+    function setJoinerZone(
+        uint _mapId,
+        Position[] calldata _tiles
+    ) external onlyMapEditor {
+        if (_mapId == 0 || _mapId > mapCount) revert MapNotFound();
+        uint256 bitmap = 0;
+        for (uint i = 0; i < _tiles.length; i++) {
+            Position calldata pos = _tiles[i];
+            if (
+                pos.row < 0 ||
+                pos.row >= GRID_HEIGHT ||
+                pos.col < 0 ||
+                pos.col >= GRID_WIDTH
+            ) {
+                revert InvalidPosition();
+            }
+            bitmap = _setBit(bitmap, _bitIndex(pos.row, pos.col));
+        }
+        presetJoinerZoneBitmap[_mapId] = bitmap;
+        emit DeploymentZoneSet(_mapId, false);
+    }
+
+    /**
+     * @dev Whether (row,col) is a legal deployment tile for the given side
+     * on the given map — called by Fleets.createFleet. If the map has no
+     * custom zone configured for that side (bitmask unset), falls back to
+     * the engine-wide default column band (the rule Fleets.sol enforced
+     * unconditionally before this existed).
+     * @param _mapId The map ID (Fleets.sol never calls this with 0 — that
+     *        sentinel is handled entirely on its side, see setMapsAddress)
+     * @param _row The row coordinate
+     * @param _col The column coordinate
+     * @param _isCreator Whether this is the creator's (vs. joiner's) side
+     * @return Whether this tile is a legal deployment tile
+     */
+    function isValidDeploymentTile(
+        uint _mapId,
+        int16 _row,
+        int16 _col,
+        bool _isCreator
+    ) public view returns (bool) {
+        if (_mapId == 0 || _mapId > mapCount) revert MapNotFound();
+        if (_row < 0 || _row >= GRID_HEIGHT || _col < 0 || _col >= GRID_WIDTH) {
+            return false;
+        }
+        uint256 bitmap = _isCreator
+            ? presetCreatorZoneBitmap[_mapId]
+            : presetJoinerZoneBitmap[_mapId];
+        if (bitmap != 0) {
+            return _isBitSet(bitmap, _bitIndex(_row, _col));
+        }
+        // No custom zone: fall back to the default column band.
+        return
+            _isCreator
+                ? (_col >= DEFAULT_CREATOR_MIN_COL &&
+                    _col <= DEFAULT_CREATOR_MAX_COL)
+                : (_col >= DEFAULT_JOINER_MIN_COL &&
+                    _col <= DEFAULT_JOINER_MAX_COL);
+    }
+
+    /**
+     * @dev Get a preset map's custom creator-zone tiles (empty if using the
+     * default — see isValidDeploymentTile).
+     * @param _mapId The map ID
+     * @return Array of creator-zone positions
+     */
+    function getCreatorZonePositions(
+        uint _mapId
+    ) external view returns (Position[] memory) {
+        if (_mapId == 0 || _mapId > mapCount) revert MapNotFound();
+        return _unpackBitmap(presetCreatorZoneBitmap[_mapId]);
+    }
+
+    /**
+     * @dev Get a preset map's custom joiner-zone tiles (empty if using the
+     * default — see isValidDeploymentTile).
+     * @param _mapId The map ID
+     * @return Array of joiner-zone positions
+     */
+    function getJoinerZonePositions(
+        uint _mapId
+    ) external view returns (Position[] memory) {
+        if (_mapId == 0 || _mapId > mapCount) revert MapNotFound();
+        return _unpackBitmap(presetJoinerZoneBitmap[_mapId]);
     }
 }

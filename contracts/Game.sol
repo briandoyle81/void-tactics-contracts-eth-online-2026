@@ -608,30 +608,15 @@ contract Game is Ownable {
             // Allow moving to the current position (no-op move), skip movement validation and position occupied check
 
             if (!(shipPos.row == _newRow && shipPos.col == _newCol)) {
-                uint8 movementCost = _manhattanDistance(
-                    shipPos,
-                    Position(_newRow, _newCol)
+                _validateAndApplyMovement(
+                    game,
+                    _gameId,
+                    _shipId,
+                    oldRow,
+                    oldCol,
+                    _newRow,
+                    _newCol
                 );
-                Attributes storage attributes = game.shipAttributes[_shipId];
-                if (movementCost > attributes.movement) revert InvalidMove();
-                // Lower-bound check matters here too, for the same reason as
-                // _placeShipOnGrid: int16 coordinates let a negative value slip
-                // past an upper-bound-only comparison.
-                if (
-                    _newRow < 0 ||
-                    _newCol < 0 ||
-                    _newRow >= GRID_HEIGHT ||
-                    _newCol >= GRID_WIDTH
-                ) revert InvalidMove();
-                // Occupied destinations are never reachable by a plain move —
-                // see the Ram special for the only way to land on another
-                // ship's tile.
-                if (game.grid[_newRow][_newCol] != 0) revert InvalidMove();
-                Position storage p = game.shipPositions[_shipId].position;
-                game.grid[p.row][p.col] = 0;
-                game.grid[_newRow][_newCol] = _shipId;
-                p.row = _newRow;
-                p.col = _newCol;
             }
 
             EnumerableSet.add(game.shipMovedThisRound, _shipId);
@@ -683,6 +668,54 @@ contract Game is Ownable {
             targetShipId
         );
         emit GameUpdate(_gameId);
+    }
+
+    // Validates a plain (non-Retreat, non-no-op) move's cost/bounds/
+    // occupancy/impassable-path and applies it to the grid. Split out of
+    // moveShip solely to relieve legacy-codegen stack pressure — moveShip
+    // already sits at its ~16-local-slot limit, and this block's own locals
+    // (movementCost, the storage pointer to the ship's position) don't need
+    // to stay live in moveShip's frame once this call returns.
+    function _validateAndApplyMovement(
+        GameData storage game,
+        uint _gameId,
+        uint _shipId,
+        int16 _oldRow,
+        int16 _oldCol,
+        int16 _newRow,
+        int16 _newCol
+    ) private {
+        uint8 movementCost = _manhattanDistance(
+            Position(_oldRow, _oldCol),
+            Position(_newRow, _newCol)
+        );
+        if (movementCost > game.shipAttributes[_shipId].movement)
+            revert InvalidMove();
+        // Lower-bound check matters here too, for the same reason as
+        // _placeShipOnGrid: int16 coordinates let a negative value slip
+        // past an upper-bound-only comparison.
+        if (
+            _newRow < 0 ||
+            _newCol < 0 ||
+            _newRow >= GRID_HEIGHT ||
+            _newCol >= GRID_WIDTH
+        ) revert InvalidMove();
+        // Occupied destinations are never reachable by a plain move — see
+        // the Ram special for the only way to land on another ship's tile.
+        if (game.grid[_newRow][_newCol] != 0) revert InvalidMove();
+        // Impassable terrain blocks landing on AND passing through — a
+        // single straight-line check (reusing the same Bresenham walk as
+        // shooting LOS, against the independent impassable bitmask) covers
+        // both, since the walk's own destination check already covers
+        // "onto".
+        if (
+            !maps.hasMovementPath(_gameId, _oldRow, _oldCol, _newRow, _newCol)
+        ) revert InvalidMove();
+        Position storage p = game.shipPositions[_shipId].position;
+        game.grid[p.row][p.col] = 0;
+        game.grid[_newRow][_newCol] = _shipId;
+        p.row = _newRow;
+        p.col = _newCol;
     }
 
     /// @dev Dispatches moveShip actions. Unknown or removed enum values revert so a ship is never

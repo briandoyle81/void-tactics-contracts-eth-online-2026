@@ -1339,6 +1339,154 @@ describe("Game", function () {
       }
     });
 
+    it("should revert InvalidMove when the path to a destination crosses an impassable tile (blocks THROUGH, not just onto)", async function () {
+      const {
+        creatorLobbies,
+        joinerLobbies,
+        creator,
+        joiner,
+        ships,
+        game,
+        maps,
+        owner,
+        randomManager,
+      } = await loadFixture(deployGameFixture);
+
+      await ships.write.purchaseWithFlow(
+        [creator.account.address, 0n, joiner.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      await ships.write.purchaseWithFlow(
+        [joiner.account.address, 0n, creator.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      for (let i = 1; i <= 10; i++) {
+        const shipTuple = (await ships.read.ships([BigInt(i)])) as ShipTuple;
+        const ship = tupleToShip(shipTuple);
+        await randomManager.write.revealRandomness([
+          ship.traits.serialNumber,
+        ]);
+      }
+      await ships.write.constructAllMyShips({ account: creator.account });
+      await ships.write.constructAllMyShips({ account: joiner.account });
+
+      await creatorLobbies.write.createLobby([
+        1000n,
+        300n,
+        true,
+        0n, // selectedMapId - no preset map
+        100n,
+        zeroAddress,
+      ]);
+      await joinerLobbies.write.joinLobby([1n]);
+      await creatorLobbies.write.createFleet([
+        1n,
+        [1n],
+        generateStartingPositions([1n], true),
+      ]);
+      await joinerLobbies.write.createFleet([
+        1n,
+        [6n],
+        generateStartingPositions([6n], false),
+      ]);
+
+      const creatorAttributes = await game.read.getShipAttributes([1n, 1]);
+      const movementRange = creatorAttributes.movement;
+
+      if (movementRange >= 2) {
+        // Controlled start position, straight horizontal path to (5,4).
+        await setShipPosition(game.address, 1n, 1n, 5, 2);
+        // Impassable tile strictly BETWEEN start and destination (not the
+        // destination itself) -- proves the path is blocked THROUGH the
+        // cell, not just when landing ON it.
+        await maps.write.setImpassableTile([1n, 5, 3, true], {
+          account: owner.account,
+        });
+
+        await expect(
+          game.write.moveShip([1n, 1n, 5, 4, ActionType.Pass, 0n], {
+            account: creator.account,
+          }),
+        ).to.be.rejectedWith("InvalidMove");
+      }
+    });
+
+    it("should still allow a move whose path crosses a tile that is only blocked (LOS), not impassable", async function () {
+      // Same shape as the impassable test above, but with setBlockedTile
+      // instead -- proves the two bits are independent at the Game.sol
+      // boundary: a pure line-of-sight obstacle never stops movement.
+      const {
+        creatorLobbies,
+        joinerLobbies,
+        creator,
+        joiner,
+        ships,
+        game,
+        maps,
+        owner,
+        randomManager,
+      } = await loadFixture(deployGameFixture);
+
+      await ships.write.purchaseWithFlow(
+        [creator.account.address, 0n, joiner.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      await ships.write.purchaseWithFlow(
+        [joiner.account.address, 0n, creator.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      for (let i = 1; i <= 10; i++) {
+        const shipTuple = (await ships.read.ships([BigInt(i)])) as ShipTuple;
+        const ship = tupleToShip(shipTuple);
+        await randomManager.write.revealRandomness([
+          ship.traits.serialNumber,
+        ]);
+      }
+      await ships.write.constructAllMyShips({ account: creator.account });
+      await ships.write.constructAllMyShips({ account: joiner.account });
+
+      await creatorLobbies.write.createLobby([
+        1000n,
+        300n,
+        true,
+        0n,
+        100n,
+        zeroAddress,
+      ]);
+      await joinerLobbies.write.joinLobby([1n]);
+      await creatorLobbies.write.createFleet([
+        1n,
+        [1n],
+        generateStartingPositions([1n], true),
+      ]);
+      await joinerLobbies.write.createFleet([
+        1n,
+        [6n],
+        generateStartingPositions([6n], false),
+      ]);
+
+      const creatorAttributes = await game.read.getShipAttributes([1n, 1]);
+      const movementRange = creatorAttributes.movement;
+
+      if (movementRange >= 2) {
+        await setShipPosition(game.address, 1n, 1n, 5, 2);
+        await maps.write.setBlockedTile([1n, 5, 3, true], {
+          account: owner.account,
+        });
+
+        await game.write.moveShip([1n, 1n, 5, 4, ActionType.Pass, 0n], {
+          account: creator.account,
+        });
+
+        const gameData = (await game.read.getGame([
+          1n,
+        ])) as unknown as GameDataView;
+        const newPosition = findShipPosition(gameData, 1n);
+        expect(newPosition.row).to.equal(5);
+        expect(newPosition.col).to.equal(4);
+      }
+    });
+
     it("should prevent movement beyond ship's movement range", async function () {
       const {
         creatorLobbies,
@@ -7371,6 +7519,7 @@ describe("Game", function () {
         generateStartingPositions(shipIds, true),
         BigInt(totalCost),
         true,
+        0n, // mapId
       ]);
       const fleetId = await fleets.read.fleetCount();
 

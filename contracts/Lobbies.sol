@@ -581,7 +581,8 @@ contract Lobbies is Ownable, ReentrancyGuard {
             _shipIds,
             _startingPositions,
             lobby.basic.costLimit,
-            isCreator
+            isCreator,
+            lobby.gameConfig.selectedMapId
         );
 
         // Assign fleet to the correct player and determine who goes first

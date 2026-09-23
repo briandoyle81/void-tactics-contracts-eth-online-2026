@@ -229,6 +229,7 @@ contract RoguelikeResupply is Ownable {
                 col: int16(int(i % 4))
             });
         }
-        fleetId = fleets.createFleet(0, _player, _shipIds, positions, _costCap, true);
+        // mapId 0: map-agnostic synthetic fleet, see the doc comment above.
+        fleetId = fleets.createFleet(0, _player, _shipIds, positions, _costCap, true, 0);
     }
 }

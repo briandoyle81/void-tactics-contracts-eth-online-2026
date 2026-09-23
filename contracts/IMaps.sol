@@ -25,6 +25,21 @@ interface IMaps {
         int16 _col
     ) external view returns (bool);
 
+    // Set/check impassable (movement-blocking) tiles — independent of the
+    // blocked (LOS-only) flag above.
+    function setImpassableTile(
+        uint _gameId,
+        int16 _row,
+        int16 _col,
+        bool _impassable
+    ) external;
+
+    function isTileImpassable(
+        uint _gameId,
+        int16 _row,
+        int16 _col
+    ) external view returns (bool);
+
     // Main line of sight function using Bresenham's algorithm
     function hasMaps(
         uint _gameId,
@@ -34,10 +49,37 @@ interface IMaps {
         int16 _y1
     ) external view returns (bool);
 
-    // Preset map functions
+    // Whether a ship can move between two points without its path crossing
+    // an impassable tile (blocks landing on and passing through).
+    function hasMovementPath(
+        uint _gameId,
+        int16 _row0,
+        int16 _col0,
+        int16 _row1,
+        int16 _col1
+    ) external view returns (bool);
+
+    // Preset map functions. Note: createPresetMap/createPresetScoringMap
+    // below are overloaded/disambiguated on the Maps.sol implementation side
+    // (see that contract's comments) — these declarations match the actual
+    // implementation's signatures (no return value; MapMode included).
     function createPresetMap(
-        Position[] calldata _blockedPositions
-    ) external returns (uint);
+        Position[] calldata _blockedPositions,
+        ScoringPosition[] calldata _scoringPositions,
+        MapMode _mode
+    ) external;
+
+    function createPresetMap(
+        Position[] calldata _blockedPositions,
+        MapMode _mode
+    ) external;
+
+    function createFullPresetMap(
+        Position[] calldata _blockedPositions,
+        Position[] calldata _impassablePositions,
+        ScoringPosition[] calldata _scoringPositions,
+        MapMode _mode
+    ) external;
 
     function updatePresetMap(
         uint _mapId,
@@ -50,11 +92,42 @@ interface IMaps {
         uint _mapId
     ) external view returns (Position[] memory);
 
+    function getPresetMapImpassable(
+        uint _mapId
+    ) external view returns (Position[] memory);
+
     function mapExists(uint _mapId) external view returns (bool);
 
     function mapCount() external view returns (uint);
 
     function mapMode(uint _mapId) external view returns (MapMode);
+
+    function mapName(uint _mapId) external view returns (string memory);
+
+    function setMapName(uint _mapId, string calldata _name) external;
+
+    // Deployment zones
+    function setCreatorZone(
+        uint _mapId,
+        Position[] calldata _tiles
+    ) external;
+
+    function setJoinerZone(uint _mapId, Position[] calldata _tiles) external;
+
+    function isValidDeploymentTile(
+        uint _mapId,
+        int16 _row,
+        int16 _col,
+        bool _isCreator
+    ) external view returns (bool);
+
+    function getCreatorZonePositions(
+        uint _mapId
+    ) external view returns (Position[] memory);
+
+    function getJoinerZonePositions(
+        uint _mapId
+    ) external view returns (Position[] memory);
 
     // Scoring tile functions
     function getGameMapState(
@@ -64,7 +137,8 @@ interface IMaps {
         view
         returns (
             Position[] memory blockedPositions,
-            ScoringPosition[] memory scoringPositions
+            ScoringPosition[] memory scoringPositions,
+            Position[] memory impassablePositions
         );
 
     // Scoring positions only — for on-chain callers (round-end scoring,
@@ -102,8 +176,9 @@ interface IMaps {
 
     // Preset scoring map functions
     function createPresetScoringMap(
-        ScoringPosition[] calldata _scoringPositions
-    ) external returns (uint);
+        ScoringPosition[] calldata _scoringPositions,
+        MapMode _mode
+    ) external;
 
     function updatePresetScoringMap(
         uint _mapId,

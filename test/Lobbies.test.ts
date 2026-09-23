@@ -1277,6 +1277,7 @@ describe("Lobbies", function () {
           generateStartingPositions([1n], true),
           1000n,
           true, // isCreator parameter
+          0n, // mapId
         ])
       ).to.be.rejectedWith("NotAllowedToManageFleets");
 

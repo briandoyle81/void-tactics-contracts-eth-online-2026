@@ -212,7 +212,8 @@ contract RoguelikeMatch is Ownable, IGameOrchestrator {
             shipIds,
             _positions,
             run.currentCostCap,
-            true
+            true,
+            node.mapId
         );
         uint aiFleetId = _mintAIFleet(node.mapId, gameId);
 
@@ -389,7 +390,9 @@ contract RoguelikeMatch is Ownable, IGameOrchestrator {
                 col: int16(int(i % 4))
             });
         }
-        fleetId = fleets.createFleet(0, _player, _shipIds, positions, _costCap, true);
+        // mapId 0: this fleet is map-agnostic (synthetic, see the doc
+        // comment above), so Fleets falls back to its default column rule.
+        fleetId = fleets.createFleet(0, _player, _shipIds, positions, _costCap, true, 0);
     }
 
     // ---- IGameOrchestrator ----
@@ -545,7 +548,8 @@ contract RoguelikeMatch is Ownable, IGameOrchestrator {
             shipIds,
             positions,
             type(uint).max,
-            false
+            false,
+            _mapId
         );
         emit AIFleetCreated(_gameId, fleetId);
     }

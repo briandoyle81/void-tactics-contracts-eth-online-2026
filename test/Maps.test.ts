@@ -770,6 +770,150 @@ describe("Line of Sight System", function () {
     });
   });
 
+  describe("Impassable Terrain / Movement Path", function () {
+    describe("Basic get/set", function () {
+      it("Should default to not impassable", async function () {
+        expect(await maps.read.isTileImpassable([1n, 5, 5])).to.be.false;
+      });
+
+      it("Should allow the owner to set and clear an impassable tile", async function () {
+        await maps.write.setImpassableTile([1n, 5, 5, true], {
+          account: owner.address,
+        });
+        expect(await maps.read.isTileImpassable([1n, 5, 5])).to.be.true;
+
+        await maps.write.setImpassableTile([1n, 5, 5, false], {
+          account: owner.address,
+        });
+        expect(await maps.read.isTileImpassable([1n, 5, 5])).to.be.false;
+      });
+
+      it("Should reject a non-editor setting an impassable tile", async function () {
+        await expect(
+          userMaps.write.setImpassableTile([1n, 5, 5, true]),
+        ).to.be.rejected;
+      });
+
+      it("Should be independent of the blocked (LOS) flag on the same tile", async function () {
+        await maps.write.setBlockedTile([1n, 5, 5, true], {
+          account: owner.address,
+        });
+        expect(await maps.read.isTileBlocked([1n, 5, 5])).to.be.true;
+        expect(await maps.read.isTileImpassable([1n, 5, 5])).to.be.false;
+
+        await maps.write.setImpassableTile([1n, 5, 5, true], {
+          account: owner.address,
+        });
+        expect(await maps.read.isTileBlocked([1n, 5, 5])).to.be.true;
+        expect(await maps.read.isTileImpassable([1n, 5, 5])).to.be.true;
+      });
+
+      it("Should revert on out-of-bounds coordinates", async function () {
+        await expect(
+          maps.write.setImpassableTile([1n, 50, 0, true], {
+            account: owner.address,
+          }),
+        ).to.be.rejected;
+        await expect(maps.read.isTileImpassable([1n, -1, 0])).to.be.rejected;
+      });
+    });
+
+    describe("hasMovementPath", function () {
+      it("Should be clear with no impassable tiles", async function () {
+        expect(await maps.read.hasMovementPath([1n, 5, 2, 5, 8])).to.be.true;
+      });
+
+      it("Should block landing ON an impassable destination", async function () {
+        await maps.write.setImpassableTile([1n, 5, 8, true], {
+          account: owner.address,
+        });
+        expect(await maps.read.hasMovementPath([1n, 5, 2, 5, 8])).to.be.false;
+      });
+
+      it("Should block passing THROUGH an impassable cell strictly between start and end", async function () {
+        // Straight horizontal line 5,2 -> 5,8; impassable cell sits on the
+        // line but is neither the start nor the destination.
+        await maps.write.setImpassableTile([1n, 5, 5, true], {
+          account: owner.address,
+        });
+        expect(await maps.read.hasMovementPath([1n, 5, 2, 5, 8])).to.be.false;
+      });
+
+      it("Should NOT be blocked by an impassable tile that is adjacent but off the line", async function () {
+        // Same horizontal line as above, but the impassable cell is one row
+        // off the path (5,2 -> 5,8 never touches row 4 or row 6).
+        await maps.write.setImpassableTile([1n, 4, 5, true], {
+          account: owner.address,
+        });
+        expect(await maps.read.hasMovementPath([1n, 5, 2, 5, 8])).to.be.true;
+      });
+
+      it("Should let a ship leave a tile that is itself impassable (unlike hasMaps' start-tile rule)", async function () {
+        await maps.write.setImpassableTile([1n, 5, 2, true], {
+          account: owner.address,
+        });
+        // Moving AWAY from the impassable start tile must still succeed.
+        expect(await maps.read.hasMovementPath([1n, 5, 2, 5, 8])).to.be.true;
+        // Contrast: hasMaps blocks LOS entirely when the start tile itself
+        // is blocked — hasMovementPath deliberately does not mirror that.
+      });
+
+      it("Should treat staying on the same tile as always clear", async function () {
+        await maps.write.setImpassableTile([1n, 5, 5, true], {
+          account: owner.address,
+        });
+        expect(await maps.read.hasMovementPath([1n, 5, 5, 5, 5])).to.be.true;
+      });
+
+      it("Should revert on out-of-bounds coordinates", async function () {
+        await expect(maps.read.hasMovementPath([1n, -1, 0, 5, 5])).to.be
+          .rejected;
+        await expect(maps.read.hasMovementPath([1n, 0, 0, 50, 5])).to.be
+          .rejected;
+      });
+    });
+
+    describe("Preset impassable data", function () {
+      it("Should create, read back, and apply impassable positions independently of blocked ones", async function () {
+        const blocked = [{ row: 3, col: 3 }];
+        const impassable = [{ row: 7, col: 7 }];
+        const scoring: any[] = [];
+
+        await maps.write.createFullPresetMap(
+          [blocked, impassable, scoring, MapMode.Both],
+          { account: owner.address },
+        );
+        const mapId = await maps.read.mapCount();
+
+        const presetBlocked = await maps.read.getPresetMap([mapId]);
+        const presetImpassable = await maps.read.getPresetMapImpassable([
+          mapId,
+        ]);
+        expect(presetBlocked).to.deep.equal([{ row: 3, col: 3 }]);
+        expect(presetImpassable).to.deep.equal([{ row: 7, col: 7 }]);
+
+        // applyPresetMapToGame allows either gameAddress or owner() to call
+        // it — no gameAddress is configured in this fixture, so calling as
+        // the owner (the default signer for `maps`) is sufficient.
+        const gameId = 42n;
+        await maps.write.applyPresetMapToGame([gameId, mapId], {
+          account: owner.address,
+        });
+
+        expect(await maps.read.isTileBlocked([gameId, 3, 3])).to.be.true;
+        expect(await maps.read.isTileImpassable([gameId, 3, 3])).to.be.false;
+        expect(await maps.read.isTileBlocked([gameId, 7, 7])).to.be.false;
+        expect(await maps.read.isTileImpassable([gameId, 7, 7])).to.be.true;
+
+        const state = await maps.read.getGameMapState([gameId]);
+        // getGameMapState now returns [blockedPositions, scoringPositions,
+        // impassablePositions] — the 3rd element is the new one.
+        expect(state[0]).to.deep.equal([{ row: 3, col: 3 }]);
+        expect(state[2]).to.deep.equal([{ row: 7, col: 7 }]);
+      });
+    });
+  });
+
   describe("Preset Maps", function () {
     describe("Map Creation", function () {
       it("Should allow owner to create preset maps", async function () {

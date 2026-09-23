@@ -9,6 +9,7 @@ Companion docs (read these for detail, they are the source of truth for their to
 
 ## 0. TL;DR — what to do
 
+0. **Critical, check first (§9):** if the frontend still submits Ram/Repair as a plain move onto the enemy's tile, **fix that before anything else** — the live contracts require an explicit `ActionType.FactionAbility` call, so variant 1 Ram and variant 2 Repair currently don't work at all through the old code path. Unrelated to the rest of this doc; not new as of 9-20/21.
 1. **Re-point / regenerate ABIs** for: `ShipAttributes`, the five special resolvers (`EMPResolver`, `RepairDronesResolver`, `FlakArrayResolver`, `ElectricStormResolver`, `DroneSwarmResolver`), `SinglePlayerMatch`, `RoguelikeMatch`, `Game` (one function signature), and the **new** `AIBehaviorRegistry`, `Variant1AI`, `Variant2AI`. `RoguelikeAIController` no longer exists.
 2. **Rebuild the attributes editor** (§1): attributes are now versioned **per variant**, exactly like costs. There is no "start new attributes version" step any more — one `setVariantAttributes` call publishes a complete new version and makes it live.
 3. **Costs editor** (§2): same call as before; only validation changed.
@@ -227,7 +228,41 @@ Each faction now has its own AI (see §7). Notable rules (2026-09-21): **every v
 - [ ] In-game special tooltips: use `…At(variant, ship.attributes.version, slot)`.
 - [ ] Roguelike/map UI: 35 maps, first three missions are variant 1 with no DEC, refreshed AI configs (ids/stats/specials).
 
-## 9. Free ship claim & tutorial eligibility verification (reference — not part of this change)
+## 9. Critical bug: Ram/Repair must be submitted as `ActionType.FactionAbility`, not a plain move
+
+**Not part of the 2026-09-20/21 contract work** — this mechanic has been live since the earliest commit in this repo (`0d26434 "Naked fork for hackathon"`, 2026-09-09), so it predates every other section here. Flagging it now because it means **variant 1 players cannot Ram and variant 2 players cannot Repair at all** on whatever deployment the frontend currently points at, if the frontend still assumes the old model. Confirmed directly against the contracts on 2026-09-22.
+
+### The two models
+
+- **Old model (do not use):** ramming was an automatic side effect of a plain move — the frontend lets the player pick the enemy's own occupied tile as the destination and submits `ActionType.Pass` with a zeroed-out target.
+- **Current model (`Game.sol` as of this repo):** Ram (variant 1) and Repair (variant 2) are each a faction's **innate ability**, dispatched through an explicit `ActionType.FactionAbility` call and resolved by a dedicated contract — `RamResolver` for variant 1, `RepairResolver` for variant 2 (`Game.factionAbilityResolvers[variant]`). `RamResolver.sol`'s own header comment states this plainly: it is "the resolver-backed replacement for what used to be an automatic side effect of any ship's plain move."
+
+### What the frontend must submit
+
+```
+Game.moveShip(gameId, shipId, destRow, destCol, ActionType.FactionAbility, targetShipId)
+```
+
+- **`(destRow, destCol)` must be a normal legal destination** — in bounds, within the ship's movement, and on an **unoccupied** tile. `moveShip` runs this exact occupancy/movement check for every action type except `Retreat`, `FactionAbility` included, so the enemy's own tile is never a legal destination here (it will revert `InvalidMove()`, not silently no-op).
+- **`targetShipId`** is the ship being rammed or repaired. It is passed straight through to the resolver (`Game._performFactionAbility` → `RamResolver.resolveEffect` / `RepairResolver.resolveEffect`).
+- The destination must additionally be within the resolver's own range of the target (both resolvers default to range 1 — adjacent) or the resolver reverts `OutOfRange()`.
+
+### Per-resolver rules
+
+| | Variant 1 — `RamResolver` | Variant 2 — `RepairResolver` |
+|---|---|---|
+| Target side | **enemy** (`acting.isCreator == target.isCreator` reverts `InvalidRamTarget`) | **friendly** (`acting.isCreator != target.isCreator` reverts `TargetNotFriendly`) |
+| Target condition | must be at **0 HP** (`targetAttrs.hullPoints != 0` reverts `InvalidRamTarget`) | no HP condition checked by the resolver itself |
+| Effect | evicts the target (retreat, not destroy) **and relocates the rammer onto the target's now-vacated tile** — a second `SpecialEffect`, applied after the eviction, independent of the `(destRow, destCol)` submitted; also `+1` to the rammer's own reactor timer (3 destroys it) | heals the target's hull by the resolver's `strength` (default 50); no relocation — the healer simply ends up at the submitted `(destRow, destCol)` |
+| Range | `range` (default **1**), owner-settable | `range` (default **1**), owner-settable |
+
+**Important for the FE's post-action UI:** after a successful Ram, the rammer's **final position is the victim's old tile**, not the `(destRow, destCol)` that was submitted — re-read the ship's position from the game state after the tx rather than assuming it equals the submitted destination. A Repair does not relocate anyone; the healer ends up exactly where it moved to.
+
+### Which live deployments this affects
+
+This repo's own `ignition/deployments/` only has a record for **Base Sepolia** (`chain-84532`) — that deployment has both resolvers wired (`RamResolver`, `RepairResolver` in `deployed_addresses.json`). This project's `hardhat.config.ts` targets four other networks (`flow-testnet`, `ronin-saigon`, `polygon-amoy`, `xai-testnet`, plus mainnet `flow`); this repo has no local record of what's currently deployed on those, so whether they're still on the pre-fork automatic-ram model or have been upgraded is **not verifiable from this repo** — check each chain's actual deployed contracts before assuming either way.
+
+## 10. Free ship claim & tutorial eligibility verification (reference — not part of this change)
 
 Unrelated to the 2026-09-20/21 work above (`FreeShipClaim.sol` / `TutorialClaim.sol` were not touched by it), included here for reference since it came up alongside this doc.
 
@@ -246,7 +281,7 @@ Unrelated to the 2026-09-20/21 work above (`FreeShipClaim.sol` / `TutorialClaim.
   ```
   This is a write against a live/deployed contract — not something covered by this repo's test suite or ephemeral deploys, and not something to script or run without the person operating that deployment explicitly asking for it.
 
-## 10. Not changed / out of scope
+## 11. Not changed / out of scope
 
 - Ship generation odds, purchase flow, fleet cost limits, and the cost table values themselves (only validation was added).
 - `GenerateNewShip` still seeds prize-ship kill counts aligned to the **old** rank thresholds (1–9 / 10–29 / 30–99 / 100–299), and `TutorialClaim` sets `shipsDestroyed = 10` expecting rank 2; changing `rankThresholds` shifts which rank those ships land on.

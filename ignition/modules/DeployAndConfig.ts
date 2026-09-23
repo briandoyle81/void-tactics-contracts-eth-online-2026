@@ -23,7 +23,7 @@ import roguelikeStarterContent from "../data/roguelikeStarterContent.json";
 // is false — this is a plain build-time boolean (not an Ignition
 // parameter) so gated m.call(...) invocations are simply never added to the
 // deployment graph when false, rather than being skipped at execution time.
-const PRODUCTION = true;
+const PRODUCTION = false;
 
 // Address allowed to mint ships from the Firebase Flow backend, with the same
 // rights as ShipPurchaser.
@@ -1452,7 +1452,12 @@ const DeployModule = buildModule("DeployModule", (m) => {
         : m.call(
             maps,
             "createFullPresetMap",
-            [map.blockedTiles ?? [], map.scoringTiles, mode],
+            [
+              map.blockedTiles ?? [],
+              map.impassableTiles ?? [],
+              map.scoringTiles,
+              mode,
+            ],
             {
               id: `Create${map.key[0].toUpperCase()}${map.key.slice(1)}Map`,
               ...(previousMapCall ? { after: [previousMapCall] } : {}),
@@ -1860,6 +1865,11 @@ const DeployModule = buildModule("DeployModule", (m) => {
   const setFleetsShipAttributesCall = m.call(fleets, "setShipAttributes", [
     shipAttributes,
   ]);
+
+  // Set Maps address in Fleets contract — lets createFleet validate
+  // starting positions against a map's own deployment zone (falls back to
+  // the historical hardcoded column rule for any map with no custom zone).
+  const setFleetsMapsAddressCall = m.call(fleets, "setMapsAddress", [maps]);
 
   // Allow ShipPurchaser to create ships
   const allowShipPurchaserToCreateShipsCall = m.call(
@@ -2302,6 +2312,7 @@ const DeployModule = buildModule("DeployModule", (m) => {
         allowRoguelikeResupplyToManageFleetsCall,
         setFleetsGameAddressCall,
         setFleetsShipAttributesCall,
+        setFleetsMapsAddressCall,
       ],
     });
 
@@ -2474,6 +2485,24 @@ const DeployModule = buildModule("DeployModule", (m) => {
 
     m.call(gameBlobRegistry, "transferOwnership", [MAP_EDITOR], {
       id: "TransferGameBlobRegistryOwnership",
+    });
+
+    // FreeShipClaim/TutorialClaim were missing from this handover (found
+    // 2026-09-22): the map admin is supposed to be able to turn free-ship
+    // eligibility gating on/off (setEligibilityProvider) the same way it
+    // controls everything else, but without these two calls both contracts
+    // stayed owned by the deployer forever.
+    m.call(freeShipClaim, "transferOwnership", [MAP_EDITOR], {
+      id: "TransferFreeShipClaimOwnership",
+      after: [
+        setFreeShipClaimDroneStorefrontCall,
+        setFreeShipClaimEligibilityProviderCall!,
+      ],
+    });
+
+    m.call(tutorialClaim, "transferOwnership", [MAP_EDITOR], {
+      id: "TransferTutorialClaimOwnership",
+      after: [setTutorialClaimEligibilityProviderCall!],
     });
 
     m.call(eligibilityProvider, "transferOwnership", [MAP_EDITOR], {
