@@ -1,17 +1,30 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
+import "@openzeppelin/contracts/access/Ownable.sol";
 import "./Types.sol";
 import "./IOnchainRandomShipNames.sol";
 import "./IDroneNames.sol";
+import "./IGameView.sol";
 
-contract GenerateNewShip {
+contract GenerateNewShip is Ownable {
     IOnchainRandomShipNames public immutable shipNames;
     IDroneNames public immutable droneNames;
+    // Wired post-deploy (Game.sol doesn't exist yet when this contract is
+    // constructed — Game depends on Ships, which depends on this). Used only
+    // to read maxSpecialSlot so the random roll below never lands on a slot
+    // with no registered resolver. Guarded everywhere it's read: an unset
+    // game falls back to always rolling None rather than reverting ship
+    // generation over missing wiring.
+    IGameView public game;
 
-    constructor(address _shipNames, address _droneNames) {
+    constructor(address _shipNames, address _droneNames) Ownable(msg.sender) {
         shipNames = IOnchainRandomShipNames(_shipNames);
         droneNames = IDroneNames(_droneNames);
+    }
+
+    function setGameContract(address _game) external onlyOwner {
+        game = IGameView(_game);
     }
 
     function generateSpecificShip(
@@ -120,12 +133,18 @@ contract GenerateNewShip {
         }
 
         randomBase++;
-        // Special is a per-faction local slot 0-7 (see Types.sol) — roll
-        // across the full fixed range, not just the first 4. Still not
-        // variant-aware (a ship can randomly land on a slot that's inert
-        // for its own faction) — that's a separate, deliberate follow-up.
+        // Special is a per-faction local slot (see Types.sol) — roll only
+        // across the slots this variant actually has a resolver for
+        // (maxSpecialSlot[variant] + 1, since None is always a valid
+        // outcome), so a freshly-generated ship can never land on an inert
+        // filler slot (4-7 today) that reverts the moment it's used. Falls
+        // back to always-None if `game` isn't wired yet, rather than
+        // reverting ship generation.
+        uint8 maxSlot = address(game) != address(0)
+            ? game.maxSpecialSlot(variant)
+            : 0;
         newShip.equipment.special = Special(
-            uint(keccak256(abi.encodePacked(randomBase))) % 8
+            uint(keccak256(abi.encodePacked(randomBase))) % (uint(maxSlot) + 1)
         );
 
         // TODO: Should it be adjustable chance for shiny?

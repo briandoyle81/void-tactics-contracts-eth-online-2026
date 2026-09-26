@@ -904,6 +904,43 @@ const DeployModule = buildModule("DeployModule", (m) => {
     { id: "SetDroneSwarmResolver" },
   );
 
+  // Declare each variant's highest REAL special slot — separate from the
+  // resolver wiring above because a slot can be real without a resolver
+  // (variant 2's Slot3 AdditionalThruster is a passive read straight out of
+  // ShipAttributes, never dispatched through a resolver). Read by
+  // GenerateNewShip (constrains its random roll) and DroneYard (rejects
+  // customizing onto an inert slot) — see maxSpecialSlot's own comment on
+  // Game.sol. Both factions currently top out at Slot3.
+  const setMaxSpecialSlotVariant1Call = m.call(
+    game,
+    "setMaxSpecialSlot",
+    [1, 3],
+    { id: "SetMaxSpecialSlotVariant1" },
+  );
+  const setMaxSpecialSlotVariant2Call = m.call(
+    game,
+    "setMaxSpecialSlot",
+    [2, 3],
+    { id: "SetMaxSpecialSlotVariant2" },
+  );
+
+  // Wire Game's address into GenerateNewShip/DroneYard so they can read
+  // maxSpecialSlot above — set post-deploy since Game doesn't exist yet when
+  // either contract is constructed (Game depends on Ships, which depends on
+  // GenerateNewShip).
+  const setGenerateNewShipGameContractCall = m.call(
+    generateNewShip,
+    "setGameContract",
+    [game],
+    { id: "SetGenerateNewShipGameContract" },
+  );
+  const setDroneYardGameContractCall = m.call(
+    droneYard,
+    "setGameContract",
+    [game],
+    { id: "SetDroneYardGameContract" },
+  );
+
   // Per-faction AI decision contracts, registered by variant in
   // AIBehaviorRegistry (looked up by SinglePlayerMatch and RoguelikeMatch).
   // Each is built around what its own faction has: Variant1AI knows healing
@@ -2296,8 +2333,14 @@ const DeployModule = buildModule("DeployModule", (m) => {
       after: [setShipPurchaserPurchaseInfoCall],
     });
 
+    m.call(generateNewShip, "transferOwnership", [MAP_EDITOR], {
+      id: "TransferGenerateNewShipOwnership",
+      after: [setGenerateNewShipGameContractCall],
+    });
+
     m.call(droneYard, "transferOwnership", [MAP_EDITOR], {
       id: "TransferDroneYardOwnership",
+      after: [setDroneYardGameContractCall],
     });
 
     m.call(maps, "transferOwnership", [MAP_EDITOR], {
@@ -2336,6 +2379,8 @@ const DeployModule = buildModule("DeployModule", (m) => {
         setFlakArrayResolverCall,
         setElectricStormResolverCall,
         setDroneSwarmResolverCall,
+        setMaxSpecialSlotVariant1Call,
+        setMaxSpecialSlotVariant2Call,
       ],
     });
 

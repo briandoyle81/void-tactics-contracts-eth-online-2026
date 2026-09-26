@@ -48,6 +48,22 @@ contract Game is Ownable {
     // Game.sol's bytecode.
     mapping(uint16 => mapping(Special => address)) public specialResolvers;
 
+    // Highest Special slot that's real for the variant — set explicitly via
+    // setMaxSpecialSlot below, NOT derived from specialResolvers. A slot can
+    // be real without a resolver entry (e.g. variant 2's Slot3
+    // AdditionalThruster is a passive read straight out of
+    // ShipAttributes.calculateShipAttributes, never dispatched through
+    // _performSpecial at all), so "has a resolver" is not a safe proxy for
+    // "is a real slot" and must not be used to auto-derive this. Read
+    // externally (via IGameView) by GenerateNewShip (constrains the random
+    // roll to only real slots) and DroneYard (rejects customizing a ship
+    // onto an inert slot). ASSUMES every variant's real slots are
+    // contiguous from Slot1 upward (matches every faction shipped so far).
+    // Whoever adds a new special (active or passive) for a variant MUST
+    // also call setMaxSpecialSlot if it raises the variant's max — nothing
+    // enforces that automatically.
+    mapping(uint16 => uint8) public maxSpecialSlot;
+
     // Ceiling on how high any heal effect (RepairDrones, faction Repair,
     // etc.) can raise a ship's HP, as a percent of maxHullPoints — applies
     // globally, across every mode (PvP/campaign/roguelike alike), since
@@ -135,6 +151,13 @@ contract Game is Ownable {
         address _resolver
     ) public onlyOwner {
         specialResolvers[_variant][_slot] = _resolver;
+    }
+
+    // Deliberately separate from setSpecialResolver (see maxSpecialSlot's own
+    // comment) — a passive special with no resolver (e.g. variant 2's Slot3)
+    // still needs this raised explicitly.
+    function setMaxSpecialSlot(uint16 _variant, Special _slot) public onlyOwner {
+        maxSpecialSlot[_variant] = uint8(_slot);
     }
 
     function setHealCapPercent(uint8 _percent) public onlyOwner {
@@ -703,19 +726,65 @@ contract Game is Ownable {
         // Occupied destinations are never reachable by a plain move — see
         // the Ram special for the only way to land on another ship's tile.
         if (game.grid[_newRow][_newCol] != 0) revert InvalidMove();
-        // Impassable terrain blocks landing on AND passing through — a
-        // single straight-line check (reusing the same Bresenham walk as
-        // shooting LOS, against the independent impassable bitmask) covers
-        // both, since the walk's own destination check already covers
-        // "onto".
+        // Impassable terrain AND enemy ships block landing on AND passing
+        // through — a single straight-line check (reusing the same
+        // Bresenham walk as shooting LOS, against the impassable bitmask OR
+        // the enemy side's current positions) covers both, since the walk's
+        // own destination check already covers "onto". Ally ships never
+        // block this (they already block only the exact destination tile,
+        // via the occupied-destination check above) — matches enemy ships
+        // being a hard obstacle, allies staying a soft one.
+        uint256 enemyBitmap = _enemyOccupiedBitmap(
+            game,
+            game.shipPositions[_shipId].isCreator,
+            0
+        );
         if (
-            !maps.hasMovementPath(_gameId, _oldRow, _oldCol, _newRow, _newCol)
+            !maps.hasMovementPathAvoidingShips(
+                _gameId,
+                _oldRow,
+                _oldCol,
+                _newRow,
+                _newCol,
+                enemyBitmap
+            )
         ) revert InvalidMove();
         Position storage p = game.shipPositions[_shipId].position;
         game.grid[p.row][p.col] = 0;
         game.grid[_newRow][_newCol] = _shipId;
         p.row = _newRow;
         p.col = _newCol;
+    }
+
+    // Bit-per-cell mask (same packing Maps.sol's own bitmaps use: row *
+    // GRID_WIDTH + col) of every currently-alive enemy ship's tile, for
+    // hasMovementPathAvoidingShips/hasMapsAvoidingShips — Maps.sol has no
+    // ship-position knowledge of its own, so this has to be built here.
+    // playerActiveShipIds is kept in lockstep with shipPositions on every
+    // move and removal (see getAllShipPositions' own comment on that
+    // invariant), so this is guaranteed to reflect exactly the enemy ships
+    // actually on the board right now — no stale/destroyed entries.
+    // `_excludeShipId` is skipped if present (0 never matches a real ship
+    // id) — used by the shooting check to keep the shot's own target off
+    // the "blocking" list (see hasMapsAvoidingShips for why that matters).
+    function _enemyOccupiedBitmap(
+        GameData storage game,
+        bool _actingShipIsCreator,
+        uint _excludeShipId
+    ) private view returns (uint256 bitmap) {
+        EnumerableSet.UintSet storage enemyIds = _actingShipIsCreator
+            ? game.playerActiveShipIds[game.metadata.joiner]
+            : game.playerActiveShipIds[game.metadata.creator];
+        uint len = EnumerableSet.length(enemyIds);
+        for (uint i = 0; i < len; i++) {
+            uint shipId = EnumerableSet.at(enemyIds, i);
+            if (shipId == _excludeShipId) continue;
+            Position storage pos = game.shipPositions[shipId].position;
+            bitmap |= (uint256(1) <<
+                (uint(uint16(pos.row)) *
+                    uint(uint16(GRID_WIDTH)) +
+                    uint(uint16(pos.col))));
+        }
     }
 
     /// @dev Dispatches moveShip actions. Unknown or removed enum values revert so a ship is never
@@ -790,48 +859,15 @@ contract Game is Ownable {
         // game.lastDamage[...] write (a struct-nested mapping access needs one more
         // transient slot than the flat mapping this replaced — see I-06 fix).
         Attributes storage shooterAttributes = game.shipAttributes[_shipId];
-        {
-            ShipPosition storage targetShipPos = game.shipPositions[targetShipId];
-            uint8 manhattan = _manhattanDistance(
-                Position(_newRow, _newCol),
-                targetShipPos.position
-            );
-            // Combined into one revert (was three separate if/revert blocks)
-            // purely to save bytecode — Game.sol has no headroom to spare.
-            // Conditions, in original order:
-            //   1-2. Reject a target that was never placed in this game
-            //      (shipId == 0, the default-zeroed struct for any id
-            //      shipPositions was never written for) or that has since
-            //      fled/been destroyed (status != 0) — entries aren't
-            //      deleted on removal, only status flips, so shipId alone
-            //      doesn't catch a stale target. Without this, a hostile
-            //      caller can target any ship id at all (not just this
-            //      game's participants), reach the 0-HP reactor-timer branch
-            //      below for it, and permanently brick round completion when
-            //      _removeShipFromGame reverts ShipNotFound for a
-            //      non-participant (see docs/audit-2.md HA2-01). Mirrors the
-            //      same check RamResolver/EMPResolver/DroneSwarmResolver
-            //      already have (SP-02).
-            //   3. Out of range.
-            //   4. Out of line of sight (only checked past range 1 — the
-            //      short-circuiting && below skips the external maps.hasMaps
-            //      call entirely when adjacent, exactly as before).
-            if (
-                targetShipPos.shipId == 0 ||
-                targetShipPos.status != 0 ||
-                manhattan > shooterAttributes.range ||
-                (manhattan > 1 &&
-                    !maps.hasMaps(
-                        _gameId,
-                        _newRow,
-                        _newCol,
-                        targetShipPos.position.row,
-                        targetShipPos.position.col
-                    ))
-            ) {
-                revert InvalidMove();
-            }
-        }
+        _validateShootTarget(
+            game,
+            _gameId,
+            _shipId,
+            _newRow,
+            _newCol,
+            targetShipId,
+            shooterAttributes.range
+        );
 
         // Get target attributes
         Attributes storage targetAttributes = game.shipAttributes[targetShipId];
@@ -857,6 +893,71 @@ contract Game is Ownable {
             game.lastDamage[targetShipId] = _shipId;
         } else {
             targetAttributes.hullPoints -= uint8(reducedDamage);
+        }
+    }
+
+    // Validates a shoot target: exists, not already gone, in range, and
+    // (past range 1) has a clear line of sight — now accounting for enemy
+    // ships blocking LOS too, not just terrain (ally ships never block,
+    // same "enemy is a hard obstacle, ally is a soft one" rule as movement).
+    // Split out of _performShoot purely to relieve legacy-codegen stack
+    // pressure, same reasoning as _validateAndApplyMovement — _performShoot
+    // has no headroom to spare for targetShipPos/manhattan/the enemy bitmap
+    // staying live in its own frame.
+    //
+    // Conditions checked, in original order (combined into one revert
+    // purely to save bytecode — Game.sol has no headroom to spare):
+    //   1-2. Reject a target that was never placed in this game (shipId ==
+    //      0, the default-zeroed struct for any id shipPositions was never
+    //      written for) or that has since fled/been destroyed (status != 0)
+    //      — entries aren't deleted on removal, only status flips, so
+    //      shipId alone doesn't catch a stale target. Without this, a
+    //      hostile caller can target any ship id at all (not just this
+    //      game's participants), reach the 0-HP reactor-timer branch below
+    //      for it, and permanently brick round completion when
+    //      _removeShipFromGame reverts ShipNotFound for a non-participant
+    //      (see docs/audit-2.md HA2-01). Mirrors the same check
+    //      RamResolver/EMPResolver/DroneSwarmResolver already have (SP-02).
+    //   3. Out of range.
+    //   4. Out of line of sight (only checked past range 1 — the
+    //      short-circuiting && below skips the external maps call entirely
+    //      when adjacent, exactly as before). The target's own tile is
+    //      excluded from the enemy-occupied bitmap here — see
+    //      hasMapsAvoidingShips for why that's required, not optional.
+    function _validateShootTarget(
+        GameData storage game,
+        uint _gameId,
+        uint _shipId,
+        int16 _newRow,
+        int16 _newCol,
+        uint _targetShipId,
+        uint8 _range
+    ) private view {
+        ShipPosition storage targetShipPos = game.shipPositions[_targetShipId];
+        uint8 manhattan = _manhattanDistance(
+            Position(_newRow, _newCol),
+            targetShipPos.position
+        );
+        bool outOfRangeOrGone = targetShipPos.shipId == 0 ||
+            targetShipPos.status != 0 ||
+            manhattan > _range;
+        if (outOfRangeOrGone) revert InvalidMove();
+        if (manhattan > 1) {
+            uint256 enemyBitmap = _enemyOccupiedBitmap(
+                game,
+                game.shipPositions[_shipId].isCreator,
+                _targetShipId
+            );
+            if (
+                !maps.hasMapsAvoidingShips(
+                    _gameId,
+                    _newRow,
+                    _newCol,
+                    targetShipPos.position.row,
+                    targetShipPos.position.col,
+                    enemyBitmap
+                )
+            ) revert InvalidMove();
         }
     }
 

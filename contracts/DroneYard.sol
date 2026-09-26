@@ -7,6 +7,7 @@ import "./IShips.sol";
 import "./IUniversalCredits.sol";
 import "./IShipPurchaser.sol";
 import "./IOnchainRandomShipNames.sol";
+import "./IGameView.sol";
 import "./Types.sol";
 
 contract DroneYard is Ownable, ReentrancyGuard {
@@ -18,6 +19,7 @@ contract DroneYard is Ownable, ReentrancyGuard {
     error InvalidTraitValue(uint8 _value);
     error ArmorAndShieldsBothSet();
     error InvalidVariant(uint16 _variant);
+    error InvalidSpecial(Special _special);
 
     event Withdrawn(address indexed to, uint amount);
 
@@ -25,6 +27,11 @@ contract DroneYard is Ownable, ReentrancyGuard {
     IUniversalCredits public immutable universalCredits;
     IShipPurchaser public immutable shipPurchaser;
     IOnchainRandomShipNames public immutable shipNames;
+    // Wired post-deploy, same as GenerateNewShip.game — Game.sol doesn't
+    // exist yet when this contract is constructed. Guarded everywhere it's
+    // read: an unset game skips the special-slot check entirely rather than
+    // blocking every modifyShip call over missing wiring.
+    IGameView public game;
 
     constructor(
         address _ships,
@@ -36,6 +43,10 @@ contract DroneYard is Ownable, ReentrancyGuard {
         universalCredits = IUniversalCredits(_universalCredits);
         shipPurchaser = IShipPurchaser(_shipPurchaser);
         shipNames = IOnchainRandomShipNames(_shipNames);
+    }
+
+    function setGameContract(address _game) external onlyOwner {
+        game = IGameView(_game);
     }
 
     /**
@@ -153,6 +164,18 @@ contract DroneYard is Ownable, ReentrancyGuard {
             _newShip.equipment.shields != Shields.None
         ) {
             revert ArmorAndShieldsBothSet();
+        }
+
+        // Reject equipping a special slot this variant has no resolver for
+        // (an inert filler slot) — a deliberate player choice should be
+        // told it's invalid, not silently accepted into a dead loadout.
+        // Skipped if `game` isn't wired (see its own comment).
+        if (
+            address(game) != address(0) &&
+            uint8(_newShip.equipment.special) >
+            game.maxSpecialSlot(_newShip.traits.variant)
+        ) {
+            revert InvalidSpecial(_newShip.equipment.special);
         }
 
         return true;

@@ -658,6 +658,46 @@ describe("SinglePlayerMatch", function () {
       }
     });
 
+    // DeployAndConfig.ts's setMapName/setCreatorZone/setJoinerZone loop
+    // (added alongside the 2026-09-23 map-redesign pass) had no test
+    // coverage at all until now — every other map test here only checked
+    // Maps.sol's functions in isolation, never that the deploy module's own
+    // per-map wiring actually ran against real seeded content. Found via a
+    // full-repo audit (2026-09-25) and confirmed against the live Base
+    // Sepolia deploy before writing this.
+    it("wires a real display name and custom deployment zone onto deploy-seeded maps, across all three map id bands", async function () {
+      const { maps } = await loadFixture(deploySinglePlayerFixture);
+
+      // Campaign (ids 1-30): m01 uses the default (vertical) zone shape --
+      // an unset zone reads back as an empty array, not the default
+      // rectangle itself (see isValidDeploymentTile's fallback).
+      expect(await maps.read.mapName([1n])).to.equal("Open Void — Sector 1");
+      expect(await maps.read.getCreatorZonePositions([1n])).to.deep.equal([]);
+      expect(await maps.read.getJoinerZonePositions([1n])).to.deep.equal([]);
+
+      // m02 uses a custom (diagonal) zone shape -- both sides should come
+      // back with real, non-empty tile sets.
+      expect(await maps.read.mapName([2n])).to.equal(
+        "Asteroid Field — Sector 2",
+      );
+      const m02Creator = await maps.read.getCreatorZonePositions([2n]);
+      const m02Joiner = await maps.read.getJoinerZonePositions([2n]);
+      expect(m02Creator.length).to.be.greaterThan(0);
+      expect(m02Joiner.length).to.be.greaterThan(0);
+
+      // Roguelike (ids 31-60): id 31 is rlM01, dedicated content with its
+      // own hand-tuned name (not shared with any campaign map's name).
+      expect(await maps.read.mapName([31n])).to.equal(
+        "Asteroid Field — Roguelike Approach",
+      );
+
+      // PvP (ids 61-65): id 61 is pvp01, the first-ever PvP preset map.
+      expect(await maps.read.mapName([61n])).to.equal(
+        "Twin Pillars — Open Contract",
+      );
+      expect(await maps.read.mapMode([61n])).to.equal(0); // MapMode.PvP
+    });
+
     it("seeds a thirty-node campaign graph — a 15-mission mainline, a 6-mission dead end, and a 3-mission shortcut that reconverges into a 6-mission final stretch", async function () {
       const { nodeMap, human } = await loadFixture(deploySinglePlayerFixture);
 
@@ -1210,7 +1250,7 @@ describe("SinglePlayerMatch", function () {
       expect(distAfter).to.be.lessThan(distBefore);
     });
 
-    it("falls back to Pass without reverting the whole turn when the decided move is illegal", async function () {
+    it("stops adjacent to a scoring tile already held by an enemy, instead of attempting an illegal move onto it", async function () {
       const {
         ships,
         game,
@@ -1228,13 +1268,17 @@ describe("SinglePlayerMatch", function () {
       } = await loadFixture(deploySinglePlayerFixture);
 
       // A lone scoring tile that an ENEMY is standing on. A Turtle heads for
-      // the tile (there is nothing else to score), and the shared "step
-      // toward" primitive doesn't check occupancy — with the tile within its
-      // movement it walks straight onto the enemy's own square, which
-      // Game.sol correctly rejects as an occupied destination. This is a real
-      // edge case the cheap stepping primitive has, not a contrived one. (The
-      // Plasma Cannon's range of 2 keeps the enemy at 3 tiles out of gun
-      // range, so no shot preempts the move.)
+      // the tile (there is nothing else to score) — the shared "step toward"
+      // primitive now checks reachability (occupancy + enemy-path-blocking,
+      // 2026-09-26) at each candidate distance, backing off to the nearest
+      // tile short of the occupied one instead of walking straight onto the
+      // enemy's own square. Before that fix, this same scenario produced an
+      // illegal move Game.sol correctly rejected, caught by
+      // SinglePlayerMatch's try/catch fallback to a same-tile Pass (see git
+      // history for that version of this test) — now the stepping primitive
+      // gets it right on the first try, no fallback needed. (The Plasma
+      // Cannon's range of 2 keeps the enemy out of gun range from the
+      // Turtle's starting tile, so no shot preempts the move.)
       await maps.write.createPresetScoringMap([
         [{ row: 5, col: 7, points: 5, onlyOnce: false }],
         MapMode.Both,
@@ -1281,7 +1325,10 @@ describe("SinglePlayerMatch", function () {
       const gameData = (await game.read.getGame([gameId])) as GameDataView;
       const pos = findShipPosition(gameData, aiShipId);
       expect(pos.row).to.equal(5);
-      expect(pos.col).to.equal(10);
+      // Moved from (5,10) to (5,8) — one tile short of the enemy-occupied
+      // (5,7) — rather than staying put at (5,10) the way the old,
+      // occupancy-blind stepping primitive did.
+      expect(pos.col).to.equal(8);
     });
 
     it("skips a 0-HP ship and moves the next one instead of getting stuck (regression: this used to deadlock the whole match)", async function () {

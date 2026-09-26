@@ -31,10 +31,13 @@ import {
 // ---- Game.sol / Types.sol storage layout constants ----
 
 // Game.sol's own state variables start at slot 1 (slot 0 is Ownable's
-// _owner). `games` is the 9th one declared (ships, fleets, shipAttributes,
+// _owner). `games` is the 10th one declared (ships, fleets, shipAttributes,
 // maps, isAllowedToStartGames, factionAbilityResolvers, specialResolvers,
-// healCapPercent, games) -> slot 9.
-const GAMES_SLOT = 9n;
+// maxSpecialSlot, healCapPercent, games) -> slot 10. Re-verified against a
+// fresh storageLayout dump (2026-09-26, after adding maxSpecialSlot) per
+// this file's own header note — do the same any time Game.sol's declared
+// variables are reordered or a new one is added above `games`.
+const GAMES_SLOT = 10n;
 
 // GameData (Types.sol) field offsets, relative to a given game's base slot.
 const GD_SHIP_ATTRIBUTES = 22n;

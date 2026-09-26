@@ -4,7 +4,7 @@ These notes are intentionally kept out of the main `README.md` so the public pro
 
 ## Critical reminders
 
-- Don't update maps mid-lobby flow. In the future, consider setting the map and creating the game during lobby creation. Updating a map currently works, but can change unexpectedly for players between fleet selection and game start.
+- Don't update maps mid-lobby flow. In the future, consider setting the map and creating the game during lobby creation. Updating a map currently works, but can change unexpectedly for players between fleet selection and game start — this now also covers impassable (movement-blocking) tiles (`updatePresetMapImpassable`, added 2026-09-25) and deployment zones (`setCreatorZone`/`setJoinerZone`, added 2026-09-23), not just blocked/scoring tiles: a fleet's starting positions are validated against a map's zone at fleet-creation time, but nothing re-validates them against the map's zone/terrain again at game-start time, so an edit to either in between could leave a fleet's positions stale relative to what the game actually applies. Found via a full-repo audit, 2026-09-25.
 - Don't forget to set `shipNames` appropriately in `ignition/modules/DeployAndConfig.ts` before deployment.
 
 ## TODO

@@ -552,7 +552,15 @@ describe("Per-variant AI behavior trees", function () {
             { variant: 2, archetype, at: [5, 12] },
             GRUNT_AT([5, 9], { hp: 10 }),
           ],
-          humans: [{ at: [5, 11] }],
+          // Adjacent to the AI's start (so a Shoot is genuinely available
+          // this turn — that's the point being tested), but off row 5, the
+          // AI's straight-line repair-approach toward (5,9). Enemy ships
+          // now block movement (2026-09-26) — an enemy at (5,11) instead
+          // would sit exactly on that approach and make the repair
+          // genuinely unreachable in one move, which is a real, different
+          // scenario (see the "blocked by an enemy" test below), not what
+          // this test is checking.
+          humans: [{ at: [4, 12] }],
           scoringTiles: [{ row: 5, col: 9 }],
         });
         expect(r.action, `archetype ${archetype}`).to.equal(
@@ -562,6 +570,29 @@ describe("Per-variant AI behavior trees", function () {
         // Nearest free tile within repair range 1 of (5,9).
         expect([r.row, r.col], `archetype ${archetype}`).to.deep.equal([5, 10]);
       }
+    });
+
+    // Found via a real regression (2026-09-26): before enemy ships blocked
+    // movement, an enemy sitting exactly on the repair approach never
+    // mattered — the ship just flew past it. Now it can make the repair
+    // genuinely unreachable this turn (every tile within repair range of
+    // the ally is either past the enemy on the same line, or too far via
+    // any other angle within this movement budget) — the AI correctly
+    // falls through to its next priority (fight) instead of Passing.
+    it("1b: falls through to shooting when an enemy blocks the only reachable repair approach", async function () {
+      const r = await run({
+        ai: [
+          { variant: 2, archetype: GRUNT, at: [5, 12] },
+          GRUNT_AT([5, 9], { hp: 10 }),
+        ],
+        // Directly on row 5, between the AI and the ally it wants to
+        // repair — blocks every tile within repair range 1 of (5,9) that's
+        // reachable within this ship's movement (4).
+        humans: [{ at: [5, 11] }],
+        scoringTiles: [{ row: 5, col: 9 }],
+      });
+      expect(r.action).to.equal(ActionType.Shoot);
+      expect(r.target).to.equal(r.humanIds[0]);
     });
 
     it("1: also repairs a DISABLED friendly on a scoring tile, and prefers it to an injured one", async function () {

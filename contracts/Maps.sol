@@ -594,6 +594,39 @@ contract Maps is Ownable {
         return _unpackBitmap(presetImpassableMapsBitmap[_mapId]);
     }
 
+    /**
+     * @dev Update an existing preset map's impassable (movement-blocking)
+     * tiles. createFullPresetMap is the only creation entry point that sets
+     * these, and — unlike blocked/scoring tiles, which updatePresetMap/
+     * updatePresetScoringMap can already retune after creation — there was
+     * previously no way to change a preset map's impassable tiles once
+     * created. This fills that gap, mirroring updatePresetMap's full-replace
+     * pattern exactly. Independent of blocked/scoring tiles.
+     * @param _mapId The map ID to update
+     * @param _impassablePositions Array of impassable positions (full replace)
+     */
+    function updatePresetMapImpassable(
+        uint _mapId,
+        Position[] calldata _impassablePositions
+    ) external onlyMapEditor {
+        if (_mapId == 0 || _mapId > mapCount) revert MapNotFound();
+
+        uint256 bitmap = 0;
+        for (uint i = 0; i < _impassablePositions.length; i++) {
+            Position calldata pos = _impassablePositions[i];
+            if (
+                pos.row < 0 ||
+                pos.row >= GRID_HEIGHT ||
+                pos.col < 0 ||
+                pos.col >= GRID_WIDTH
+            ) {
+                revert InvalidPosition();
+            }
+            bitmap = _setBit(bitmap, _bitIndex(pos.row, pos.col));
+        }
+        presetImpassableMapsBitmap[_mapId] = bitmap;
+    }
+
     // Reconstructs a Position[] from a blocked-tile bitmask: one pass to
     // count set bits (so the memory array is allocated at the right size),
     // one pass to fill it. Shared by _getPresetMap and getGameMapState.
@@ -1013,6 +1046,108 @@ contract Maps is Ownable {
         // _isTileBlockedSafe is a generic "is this bit set in this bitmap"
         // helper (see its own comment) — reused here against the impassable
         // bitmap rather than the blocked one it's named for.
+        return _bresenhamMaps(bitmap, _row0, _col0, _row1, _col1);
+    }
+
+    /**
+     * @dev Like hasMovementPath, but ALSO blocks landing on or passing
+     * through any tile in `_enemyOccupiedBitmap` — the CURRENT positions of
+     * the acting ship's enemies for this game. Maps.sol has no ship-position
+     * knowledge of its own (that lives in Game.sol's GameData), so the
+     * caller builds this bitmap from live ship data and hands it in; a
+     * single OR against the existing impassable bitmap costs nothing extra
+     * here versus computing it once and reusing the same Bresenham walker.
+     * Ally ships never block movement this way (matches the existing "any
+     * ship blocks landing, only enemies block passing through" split) — the
+     * caller is responsible for building the bitmap from only the enemy
+     * side's ships.
+     * @param _gameId The game ID
+     * @param _row0 Starting row coordinate
+     * @param _col0 Starting column coordinate
+     * @param _row1 Ending row coordinate
+     * @param _col1 Ending column coordinate
+     * @param _enemyOccupiedBitmap Bit-per-cell mask (same packing as every
+     *        other bitmap in this contract) of every enemy ship's tile
+     * @return Whether the path (including the destination) is clear
+     */
+    function hasMovementPathAvoidingShips(
+        uint _gameId,
+        int16 _row0,
+        int16 _col0,
+        int16 _row1,
+        int16 _col1,
+        uint256 _enemyOccupiedBitmap
+    ) external view returns (bool) {
+        if (
+            _row0 < 0 ||
+            _row0 >= GRID_HEIGHT ||
+            _col0 < 0 ||
+            _col0 >= GRID_WIDTH ||
+            _row1 < 0 ||
+            _row1 >= GRID_HEIGHT ||
+            _col1 < 0 ||
+            _col1 >= GRID_WIDTH
+        ) revert InvalidPosition();
+
+        if (_row0 == _row1 && _col0 == _col1) {
+            return true; // already there; not a move
+        }
+
+        uint256 bitmap = impassableTilesBitmap[_gameId] | _enemyOccupiedBitmap;
+        return _bresenhamMaps(bitmap, _row0, _col0, _row1, _col1);
+    }
+
+    /**
+     * @dev Like hasMaps, but ALSO blocks line of sight through any tile in
+     * `_enemyOccupiedBitmap` — see hasMovementPathAvoidingShips for why
+     * Maps.sol needs the bitmap handed to it and the ally/enemy split.
+     *
+     * The caller MUST exclude the shot's own target from this bitmap. Its
+     * tile is the destination (_row1,_col1), and _bresenhamMaps' own
+     * destination check already gates the return value on the destination
+     * tile's blocked status — if the target's tile were included as
+     * "blocked," every enemy ship would become unshootable beyond range 1,
+     * since the destination would always fail that check. Terrain doesn't
+     * have this problem (it's never "the thing being targeted"), which is
+     * why hasMaps itself needs no such exclusion.
+     * @param _gameId The game ID
+     * @param _row0 Starting row coordinate
+     * @param _col0 Starting column coordinate
+     * @param _row1 Ending row coordinate (the target's own tile)
+     * @param _col1 Ending column coordinate (the target's own tile)
+     * @param _enemyOccupiedBitmap Bit-per-cell mask of every OTHER enemy
+     *        ship's tile (not the one being shot at)
+     * @return Whether there's a clear line of sight
+     */
+    function hasMapsAvoidingShips(
+        uint _gameId,
+        int16 _row0,
+        int16 _col0,
+        int16 _row1,
+        int16 _col1,
+        uint256 _enemyOccupiedBitmap
+    ) external view returns (bool) {
+        if (
+            _row0 < 0 ||
+            _row0 >= GRID_HEIGHT ||
+            _col0 < 0 ||
+            _col0 >= GRID_WIDTH ||
+            _row1 < 0 ||
+            _row1 >= GRID_HEIGHT ||
+            _col1 < 0 ||
+            _col1 >= GRID_WIDTH
+        ) revert InvalidPosition();
+
+        uint256 bitmap = blockedTilesBitmap[_gameId] | _enemyOccupiedBitmap;
+
+        if (_isTileBlockedSafe(bitmap, _row0, _col0)) {
+            return false;
+        }
+
+        if (_row0 == _row1 && _col0 == _col1) {
+            return !_isTileBlockedSafe(bitmap, _row1, _col1);
+        }
+
         return _bresenhamMaps(bitmap, _row0, _col0, _row1, _col1);
     }
 

@@ -2,6 +2,8 @@
 
 **Written: 2026-09-23.** Everything that changed in the contracts since `docs/frontend-handoff-attributes-costs-and-ai-2026-09-21.md` (still the source of truth for attributes/costs/AI — nothing here supersedes it). Describes the contracts **on `main` in the working tree**; not yet deployed anywhere as of this writing — every address is "the new address after the next full redeploy," which is expected to happen shortly after this doc is written. Re-verify against the contracts if they have changed since this date.
 
+**Update (2026-09-25):** the redeploy this doc anticipated happened on 2026-09-23 (Base Sepolia). One gap was then found and fixed: preset maps had no way to update their impassable tiles after creation (blocked and scoring tiles both already had one). §1.2 now documents the new `updatePresetMapImpassable` function. **Not yet part of the deployed contracts** — it was added after the 2026-09-23 deploy, so it needs its own redeploy (or the next one) to go live. Deployment zones were checked for the same gap and don't have it — `setCreatorZone`/`setJoinerZone` were already callable anytime after creation.
+
 Companion docs: `docs/roguelike-progression.md` (updated for this pass), `docs/ai-ship-configs.md` (unaffected, still current).
 
 ---
@@ -37,8 +39,11 @@ function hasMovementPath(uint _gameId, int16 _row0, int16 _col0, int16 _row1, in
 function getPresetMapImpassable(uint _mapId) external view returns (Position[] memory)
 function isTileImpassable(uint _gameId, int16 _row, int16 _col) public view returns (bool)
 function setImpassableTile(uint _gameId, int16 _row, int16 _col, bool _impassable) external
+function updatePresetMapImpassable(uint _mapId, Position[] calldata _impassablePositions) external   // added 2026-09-25
 ```
 `hasMovementPath` mirrors the existing LOS check (`hasMaps`) — same straight-line (Bresenham) walk, same permissive-corner diagonal rule — but against the impassable bitmap, and without the "start tile blocked ⇒ false" exception (a ship standing on a tile can always leave it, even if that tile is later marked impassable). Note `setImpassableTile`/`isTileImpassable` take a **game id**, not a map id — they edit/read a live game's copy of the map, same as the existing `setBlockedTile`/`isTileBlocked`.
+
+**`updatePresetMapImpassable` (added 2026-09-25):** the missing counterpart to `updatePresetMap`/`updatePresetScoringMap` — full-replace, `onlyMapEditor`, edits a **preset map's** impassable tiles after creation (previously only settable once, at `createFullPresetMap` time). If the FE has a preset-map editor UI that lets an admin retune blocked/scoring tiles after creation, it should offer the same for impassable tiles now.
 
 **Changed (breaking):**
 ```solidity
@@ -138,6 +143,7 @@ Unrelated to the map work, found while auditing the deploy module: on a real (`P
 - [ ] Regenerate ABIs: `Maps`, `IMaps`, `Fleets`, `IFleets`.
 - [ ] Every `Fleets.createFleet` call site: add the trailing `mapId` argument (use `0` only for a genuinely map-less/synthetic fleet).
 - [ ] Any admin/map-authoring tooling calling `createFullPresetMap`: add the `impassablePositions` argument (2nd position).
+- [ ] Preset-map editor UI: wire up `updatePresetMapImpassable` (added 2026-09-25) alongside the existing blocked/scoring update calls — not part of the 2026-09-23 deploy, needs its own redeploy.
 - [ ] Any code reading `getGameMapState`: handle the 3rd return value (`impassablePositions`).
 - [ ] Map browser/picker UI: show `mapName(mapId)` instead of the raw key; expect up to 65 maps; PvP maps are real now.
 - [ ] Deployment-zone-aware ship placement UI (if any): read `getCreatorZonePositions`/`getJoinerZonePositions` — empty array means "use the default rectangle," not "no valid tiles."

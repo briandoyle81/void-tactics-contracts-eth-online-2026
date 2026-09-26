@@ -1487,6 +1487,150 @@ describe("Game", function () {
       }
     });
 
+    // Enemy-ship blocking (2026-09-25): a ship's CURRENT position now blocks
+    // an opposing-side ship's path through it, the same way impassable
+    // terrain does — but only the enemy side; a ship's own ally never
+    // blocks anything beyond the pre-existing "can't land on an occupied
+    // tile" rule (unchanged, any ship still blocks landing on its own tile).
+    it("should revert InvalidMove when the path crosses a tile occupied by an ENEMY ship (blocks THROUGH, not just onto)", async function () {
+      const {
+        creatorLobbies,
+        joinerLobbies,
+        creator,
+        joiner,
+        ships,
+        game,
+        randomManager,
+      } = await loadFixture(deployGameFixture);
+
+      await ships.write.purchaseWithFlow(
+        [creator.account.address, 0n, joiner.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      await ships.write.purchaseWithFlow(
+        [joiner.account.address, 0n, creator.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      for (let i = 1; i <= 10; i++) {
+        const shipTuple = (await ships.read.ships([BigInt(i)])) as ShipTuple;
+        const ship = tupleToShip(shipTuple);
+        await randomManager.write.revealRandomness([
+          ship.traits.serialNumber,
+        ]);
+      }
+      await ships.write.constructAllMyShips({ account: creator.account });
+      await ships.write.constructAllMyShips({ account: joiner.account });
+
+      await creatorLobbies.write.createLobby([
+        1000n,
+        300n,
+        true,
+        0n,
+        100n,
+        zeroAddress,
+      ]);
+      await joinerLobbies.write.joinLobby([1n]);
+      await creatorLobbies.write.createFleet([
+        1n,
+        [1n],
+        generateStartingPositions([1n], true),
+      ]);
+      // Two joiner ships: 6n is just along for a valid game, 7n is placed
+      // directly in the mover's path below.
+      await joinerLobbies.write.createFleet([
+        1n,
+        [6n, 7n],
+        generateStartingPositions([6n, 7n], false),
+      ]);
+
+      const creatorAttributes = await game.read.getShipAttributes([1n, 1]);
+      const movementRange = creatorAttributes.movement;
+
+      if (movementRange >= 2) {
+        await setShipPosition(game.address, 1n, 1n, 5, 2);
+        // Enemy (joiner) ship strictly BETWEEN start (5,2) and destination
+        // (5,4) — not the destination itself, proving "through" not "onto".
+        await setShipPosition(game.address, 1n, 7n, 5, 3);
+
+        await expect(
+          game.write.moveShip([1n, 1n, 5, 4, ActionType.Pass, 0n], {
+            account: creator.account,
+          }),
+        ).to.be.rejectedWith("InvalidMove");
+      }
+    });
+
+    it("should still allow the path to cross a tile occupied by an ALLY ship", async function () {
+      const {
+        creatorLobbies,
+        joinerLobbies,
+        creator,
+        joiner,
+        ships,
+        game,
+        randomManager,
+      } = await loadFixture(deployGameFixture);
+
+      await ships.write.purchaseWithFlow(
+        [creator.account.address, 0n, joiner.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      await ships.write.purchaseWithFlow(
+        [joiner.account.address, 0n, creator.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      for (let i = 1; i <= 10; i++) {
+        const shipTuple = (await ships.read.ships([BigInt(i)])) as ShipTuple;
+        const ship = tupleToShip(shipTuple);
+        await randomManager.write.revealRandomness([
+          ship.traits.serialNumber,
+        ]);
+      }
+      await ships.write.constructAllMyShips({ account: creator.account });
+      await ships.write.constructAllMyShips({ account: joiner.account });
+
+      await creatorLobbies.write.createLobby([
+        1000n,
+        300n,
+        true,
+        0n,
+        100n,
+        zeroAddress,
+      ]);
+      await joinerLobbies.write.joinLobby([1n]);
+      // Two creator ships: 1n is the mover, 2n (its own ally) sits directly
+      // in its path.
+      await creatorLobbies.write.createFleet([
+        1n,
+        [1n, 2n],
+        generateStartingPositions([1n, 2n], true),
+      ]);
+      await joinerLobbies.write.createFleet([
+        1n,
+        [6n],
+        generateStartingPositions([6n], false),
+      ]);
+
+      const creatorAttributes = await game.read.getShipAttributes([1n, 1]);
+      const movementRange = creatorAttributes.movement;
+
+      if (movementRange >= 2) {
+        await setShipPosition(game.address, 1n, 1n, 5, 2);
+        await setShipPosition(game.address, 1n, 2n, 5, 3);
+
+        await game.write.moveShip([1n, 1n, 5, 4, ActionType.Pass, 0n], {
+          account: creator.account,
+        });
+
+        const gameData = (await game.read.getGame([
+          1n,
+        ])) as unknown as GameDataView;
+        const newPosition = findShipPosition(gameData, 1n);
+        expect(newPosition.row).to.equal(5);
+        expect(newPosition.col).to.equal(4);
+      }
+    });
+
     it("should prevent movement beyond ship's movement range", async function () {
       const {
         creatorLobbies,
@@ -3811,6 +3955,152 @@ describe("Game", function () {
           { account: creator.account },
         ),
       ).to.be.rejectedWith("InvalidMove");
+    });
+
+    // Enemy-ship LOS blocking (2026-09-25): same shape as the terrain test
+    // above, but the obstruction is a third ship instead of a blocked tile —
+    // and only when it's on the OPPOSING side from the shooter. The shot's
+    // own target never self-blocks (Game.sol excludes it when building the
+    // enemy-occupied bitmap) — this test's success case for a clean line
+    // already exercises that: the target itself sits exactly at the
+    // destination of the LOS check every time a shot is attempted, so if
+    // that exclusion were missing, no shot beyond range 1 would ever land.
+    it("should block shooting when line of sight is obstructed by an ENEMY ship, not just terrain", async function () {
+      const {
+        creatorLobbies,
+        joinerLobbies,
+        creator,
+        joiner,
+        ships,
+        game,
+        randomManager,
+      } = await loadFixture(deployGameFixture);
+
+      await ships.write.purchaseWithFlow(
+        [creator.account.address, 0n, joiner.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      await ships.write.purchaseWithFlow(
+        [joiner.account.address, 0n, creator.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      const totalShipCount = Number(await ships.read.shipCount());
+      for (let i = 1; i <= totalShipCount; i++) {
+        const shipTuple = (await ships.read.ships([BigInt(i)])) as ShipTuple;
+        const ship = tupleToShip(shipTuple);
+        await randomManager.write.revealRandomness([
+          ship.traits.serialNumber,
+        ]);
+      }
+      await ships.write.constructAllMyShips({ account: creator.account });
+      await ships.write.constructAllMyShips({ account: joiner.account });
+
+      await creatorLobbies.write.createLobby([
+        1000n,
+        300n,
+        true,
+        0n,
+        100n,
+        zeroAddress,
+      ]);
+      await joinerLobbies.write.joinLobby([1n]);
+      await creatorLobbies.write.createFleet([
+        1n,
+        [1n],
+        generateStartingPositions([1n], true),
+      ]);
+      // 6n is the shot's target; 7n (a second enemy ship) sits between
+      // shooter and target, blocking the shot.
+      await joinerLobbies.write.createFleet([
+        1n,
+        [6n, 7n],
+        generateStartingPositions([6n, 7n], false),
+      ]);
+
+      await setShipPosition(game.address, 1n, 1n, 10, 5);
+      await setShipPosition(game.address, 1n, 6n, 10, 7);
+      await setShipPosition(game.address, 1n, 7n, 10, 6);
+
+      const gameData = (await game.read.getGame([
+        1n,
+      ])) as unknown as GameDataView;
+      const creatorPos = findShipPosition(gameData, 1n);
+
+      await expect(
+        game.write.moveShip(
+          [1n, 1n, creatorPos.row, creatorPos.col, ActionType.Shoot, 6n],
+          { account: creator.account },
+        ),
+      ).to.be.rejectedWith("InvalidMove");
+    });
+
+    it("should NOT block shooting when the obstruction is an ALLY ship", async function () {
+      const {
+        creatorLobbies,
+        joinerLobbies,
+        creator,
+        joiner,
+        ships,
+        game,
+        randomManager,
+      } = await loadFixture(deployGameFixture);
+
+      await ships.write.purchaseWithFlow(
+        [creator.account.address, 0n, joiner.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      await ships.write.purchaseWithFlow(
+        [joiner.account.address, 0n, creator.account.address, 1],
+        { value: parseEther("4.99") },
+      );
+      const totalShipCount = Number(await ships.read.shipCount());
+      for (let i = 1; i <= totalShipCount; i++) {
+        const shipTuple = (await ships.read.ships([BigInt(i)])) as ShipTuple;
+        const ship = tupleToShip(shipTuple);
+        await randomManager.write.revealRandomness([
+          ship.traits.serialNumber,
+        ]);
+      }
+      await ships.write.constructAllMyShips({ account: creator.account });
+      await ships.write.constructAllMyShips({ account: joiner.account });
+
+      await creatorLobbies.write.createLobby([
+        1000n,
+        300n,
+        true,
+        0n,
+        100n,
+        zeroAddress,
+      ]);
+      await joinerLobbies.write.joinLobby([1n]);
+      // 1n is the shooter; 2n (its own ally) sits between shooter and
+      // target, and must NOT block the shot.
+      await creatorLobbies.write.createFleet([
+        1n,
+        [1n, 2n],
+        generateStartingPositions([1n, 2n], true),
+      ]);
+      await joinerLobbies.write.createFleet([
+        1n,
+        [6n],
+        generateStartingPositions([6n], false),
+      ]);
+
+      await setShipPosition(game.address, 1n, 1n, 10, 5);
+      await setShipPosition(game.address, 1n, 6n, 10, 7);
+      await setShipPosition(game.address, 1n, 2n, 10, 6);
+
+      const gameData = (await game.read.getGame([
+        1n,
+      ])) as unknown as GameDataView;
+      const creatorPos = findShipPosition(gameData, 1n);
+
+      await game.write.moveShip(
+        [1n, 1n, creatorPos.row, creatorPos.col, ActionType.Shoot, 6n],
+        { account: creator.account },
+      );
+      // Reaching here without a revert is the assertion: the ally in the
+      // way never blocked the shot.
     });
 
     it("should allow special actions even when line of sight is obstructed (only range matters)", async function () {

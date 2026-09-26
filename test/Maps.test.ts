@@ -873,6 +873,134 @@ describe("Line of Sight System", function () {
       });
     });
 
+    // Enemy-ship blocking (2026-09-25): the raw *AvoidingShips functions
+    // just OR an extra caller-supplied bitmap in — they have no notion of
+    // "ally" or "enemy" or "the shot's own target" themselves (that's
+    // Game.sol's/AIBehavior.sol's job, building the bitmap from live ship
+    // data). These tests exercise that raw bitmap-combining behavior
+    // directly; test/Game.test.ts covers the full ally-vs-enemy game rule.
+    describe("hasMovementPathAvoidingShips", function () {
+      const bit = (row: number, col: number) => 1n << BigInt(row * 17 + col);
+
+      it("Should behave exactly like hasMovementPath when the bitmap is 0", async function () {
+        expect(
+          await maps.read.hasMovementPathAvoidingShips([1n, 5, 2, 5, 8, 0n]),
+        ).to.be.true;
+      });
+
+      it("Should block landing on a tile set in the bitmap", async function () {
+        expect(
+          await maps.read.hasMovementPathAvoidingShips([
+            1n, 5, 2, 5, 8, bit(5, 8),
+          ]),
+        ).to.be.false;
+      });
+
+      it("Should block passing through a tile set in the bitmap, strictly between start and end", async function () {
+        expect(
+          await maps.read.hasMovementPathAvoidingShips([
+            1n, 5, 2, 5, 8, bit(5, 5),
+          ]),
+        ).to.be.false;
+      });
+
+      it("Should NOT be blocked by a bitmap tile off the line", async function () {
+        expect(
+          await maps.read.hasMovementPathAvoidingShips([
+            1n, 5, 2, 5, 8, bit(4, 5),
+          ]),
+        ).to.be.true;
+      });
+
+      it("Should combine with impassable terrain (either one blocks)", async function () {
+        await maps.write.setImpassableTile([1n, 5, 4, true], {
+          account: owner.address,
+        });
+        // Terrain blocks alone (empty ship bitmap):
+        expect(
+          await maps.read.hasMovementPathAvoidingShips([1n, 5, 2, 5, 8, 0n]),
+        ).to.be.false;
+        // A ship bitmap that avoids the terrain-blocked cell but hits a
+        // different cell on the line is still blocked, by the ship bit:
+        expect(
+          await maps.read.hasMovementPathAvoidingShips([
+            1n, 5, 2, 5, 8, bit(5, 6),
+          ]),
+        ).to.be.false;
+      });
+
+      it("Should treat staying on the same tile as always clear, even if that tile is in the bitmap", async function () {
+        expect(
+          await maps.read.hasMovementPathAvoidingShips([
+            1n, 5, 5, 5, 5, bit(5, 5),
+          ]),
+        ).to.be.true;
+      });
+
+      it("Should revert on out-of-bounds coordinates", async function () {
+        await expect(
+          maps.read.hasMovementPathAvoidingShips([1n, -1, 0, 5, 5, 0n]),
+        ).to.be.rejected;
+      });
+    });
+
+    describe("hasMapsAvoidingShips", function () {
+      const bit = (row: number, col: number) => 1n << BigInt(row * 17 + col);
+
+      it("Should behave exactly like hasMaps when the bitmap is 0", async function () {
+        expect(
+          await maps.read.hasMapsAvoidingShips([1n, 5, 2, 5, 8, 0n]),
+        ).to.be.true;
+      });
+
+      it("Should block LOS through a tile set in the bitmap, strictly between start and end", async function () {
+        expect(
+          await maps.read.hasMapsAvoidingShips([1n, 5, 2, 5, 8, bit(5, 5)]),
+        ).to.be.false;
+      });
+
+      it("Should NOT be blocked by a bitmap tile off the line", async function () {
+        expect(
+          await maps.read.hasMapsAvoidingShips([1n, 5, 2, 5, 8, bit(4, 5)]),
+        ).to.be.true;
+      });
+
+      it("Should also block when the bitmap tile IS the destination — callers must exclude the shot's own target themselves", async function () {
+        // This is deliberate, not a bug: the function has no idea "the
+        // destination" means "the ship being shot at" — Game.sol/
+        // AIBehavior.sol are responsible for leaving the target's own tile
+        // out of the bitmap they build (see Maps.sol's own comment on this
+        // function for why including it would make every enemy unshootable
+        // beyond range 1).
+        expect(
+          await maps.read.hasMapsAvoidingShips([1n, 5, 2, 5, 8, bit(5, 8)]),
+        ).to.be.false;
+      });
+
+      it("Should combine with blocked terrain (either one blocks)", async function () {
+        await maps.write.setBlockedTile([1n, 5, 4, true], {
+          account: owner.address,
+        });
+        expect(
+          await maps.read.hasMapsAvoidingShips([1n, 5, 2, 5, 8, 0n]),
+        ).to.be.false;
+        expect(
+          await maps.read.hasMapsAvoidingShips([1n, 5, 2, 5, 8, bit(5, 6)]),
+        ).to.be.false;
+      });
+
+      it("Should block when the START tile is in the bitmap (matches hasMaps, unlike hasMovementPathAvoidingShips)", async function () {
+        expect(
+          await maps.read.hasMapsAvoidingShips([1n, 5, 2, 5, 8, bit(5, 2)]),
+        ).to.be.false;
+      });
+
+      it("Should revert on out-of-bounds coordinates", async function () {
+        await expect(maps.read.hasMapsAvoidingShips([1n, -1, 0, 5, 5, 0n])).to
+          .be.rejected;
+      });
+    });
+
     describe("Preset impassable data", function () {
       it("Should create, read back, and apply impassable positions independently of blocked ones", async function () {
         const blocked = [{ row: 3, col: 3 }];
@@ -910,6 +1038,111 @@ describe("Line of Sight System", function () {
         // impassablePositions] — the 3rd element is the new one.
         expect(state[0]).to.deep.equal([{ row: 3, col: 3 }]);
         expect(state[2]).to.deep.equal([{ row: 7, col: 7 }]);
+      });
+    });
+
+    describe("updatePresetMapImpassable", function () {
+      it("Should allow owner to replace a preset map's impassable tiles", async function () {
+        await maps.write.createFullPresetMap(
+          [[], [{ row: 2, col: 2 }], [], MapMode.Both],
+          { account: owner.address },
+        );
+        const mapId = await maps.read.mapCount();
+
+        await maps.write.updatePresetMapImpassable(
+          [mapId, [{ row: 9, col: 9 }]],
+          { account: owner.address },
+        );
+
+        const presetImpassable = await maps.read.getPresetMapImpassable([
+          mapId,
+        ]);
+        expect(presetImpassable).to.deep.equal([{ row: 9, col: 9 }]);
+      });
+
+      it("Should be a full replace (fewer tiles clears the rest)", async function () {
+        await maps.write.createFullPresetMap(
+          [
+            [],
+            [
+              { row: 1, col: 1 },
+              { row: 2, col: 2 },
+            ],
+            [],
+            MapMode.Both,
+          ],
+          { account: owner.address },
+        );
+        const mapId = await maps.read.mapCount();
+
+        await maps.write.updatePresetMapImpassable([mapId, []], {
+          account: owner.address,
+        });
+
+        expect(await maps.read.getPresetMapImpassable([mapId])).to.deep.equal(
+          [],
+        );
+      });
+
+      it("Should leave blocked and scoring tiles untouched", async function () {
+        await maps.write.createFullPresetMap(
+          [
+            [{ row: 3, col: 3 }],
+            [{ row: 4, col: 4 }],
+            [{ row: 5, col: 5, points: 5, onlyOnce: false }],
+            MapMode.Both,
+          ],
+          { account: owner.address },
+        );
+        const mapId = await maps.read.mapCount();
+
+        await maps.write.updatePresetMapImpassable(
+          [mapId, [{ row: 9, col: 9 }]],
+          { account: owner.address },
+        );
+
+        expect(await maps.read.getPresetMap([mapId])).to.deep.equal([
+          { row: 3, col: 3 },
+        ]);
+        const scoring = await maps.read.getPresetScoringMap([mapId]);
+        expect(scoring.length).to.equal(1);
+        expect(scoring[0].row).to.equal(5);
+        expect(scoring[0].col).to.equal(5);
+      });
+
+      it("Should reject a non-editor", async function () {
+        await maps.write.createFullPresetMap(
+          [[], [], [], MapMode.Both],
+          { account: owner.address },
+        );
+        const mapId = await maps.read.mapCount();
+        await expect(
+          userMaps.write.updatePresetMapImpassable([
+            mapId,
+            [{ row: 1, col: 1 }],
+          ]),
+        ).to.be.rejected;
+      });
+
+      it("Should revert for a non-existent map", async function () {
+        await expect(
+          maps.write.updatePresetMapImpassable([999n, [{ row: 1, col: 1 }]], {
+            account: owner.address,
+          }),
+        ).to.be.rejected;
+      });
+
+      it("Should revert on out-of-bounds coordinates", async function () {
+        await maps.write.createFullPresetMap(
+          [[], [], [], MapMode.Both],
+          { account: owner.address },
+        );
+        const mapId = await maps.read.mapCount();
+        await expect(
+          maps.write.updatePresetMapImpassable([mapId, [{ row: 50, col: 0 }]], {
+            account: owner.address,
+          }),
+        ).to.be.rejected;
       });
     });
   });

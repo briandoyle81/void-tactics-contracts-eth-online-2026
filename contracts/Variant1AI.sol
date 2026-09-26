@@ -180,12 +180,13 @@ contract Variant1AI is IVariantAI, Ownable {
                     Position memory dest = ctx.pos;
                     if (dist > ramRange) {
                         uint16 gap = dist - ramRange;
-                        dest = AIBehavior.stepToward(
-                            ctx.pos,
+                        dest = AIBehavior.stepTowardReachable(
+                            ctx,
                             victimPos,
                             gap < ctx.attrs.movement
                                 ? uint8(gap)
-                                : ctx.attrs.movement
+                                : ctx.attrs.movement,
+                            0
                         );
                     }
                     return

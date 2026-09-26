@@ -91,6 +91,63 @@ library AIBehavior {
         }
     }
 
+    // Bit-per-cell mask (same packing Maps.sol's own bitmaps use: row *
+    // gridWidth + col) of every currently-alive ship on the given side, for
+    // hasMapsAvoidingShips — ships don't block their own side's shots, only
+    // the opposing side's, so the caller picks isCreatorSide based on whose
+    // shot is being checked (not always "the enemy from the AI's own point
+    // of view" — _enemyThreatensTile below asks "can THIS enemy hit that
+    // tile," which flips the roles). `excludeShipId` (0 = exclude nothing)
+    // keeps one specific ship's own tile out of the mask — required when
+    // it's the exact ship being shot at (see hasMapsAvoidingShips's own
+    // comment for why that's not optional).
+    function _shipOccupiedBitmap(
+        Ctx memory ctx,
+        bool isCreatorSide,
+        uint excludeShipId
+    ) private pure returns (uint256 bitmap) {
+        for (uint i = 0; i < ctx.g.shipPositions.length; i++) {
+            ShipPosition memory sp = ctx.g.shipPositions[i];
+            if (
+                sp.status != 0 ||
+                sp.isCreator != isCreatorSide ||
+                sp.shipId == excludeShipId
+            ) continue;
+            bitmap |= (uint256(1) <<
+                (uint(uint16(sp.position.row)) *
+                    uint(uint16(ctx.gridWidth)) +
+                    uint(uint16(sp.position.col))));
+        }
+    }
+
+    // Shared by _bestEnemyWithin/_enemyThreatensTile: LOS from `fromPos` to
+    // `targetPos`, blocked by terrain plus every ship in `sideBitmap` EXCEPT
+    // targetPos's own tile (cleared here via a single bit-index calc) — see
+    // hasMapsAvoidingShips for why the destination's own occupant can never
+    // count as blocking a shot at it. Split into its own function purely to
+    // relieve legacy-codegen stack pressure in both callers, which already
+    // sit on a lot of locals of their own (bestHp/bestIsZero/bestOnTile in
+    // one case, the outer loop's sp/attrs in the other).
+    function _hasLosExcludingTarget(
+        Ctx memory ctx,
+        Position memory fromPos,
+        Position memory targetPos,
+        uint256 sideBitmap
+    ) private view returns (bool) {
+        uint256 bitIndex = uint(uint16(targetPos.row)) *
+            uint(uint16(ctx.gridWidth)) +
+            uint(uint16(targetPos.col));
+        return
+            ctx.maps.hasMapsAvoidingShips(
+                ctx.gameId,
+                fromPos.row,
+                fromPos.col,
+                targetPos.row,
+                targetPos.col,
+                sideBitmap & ~(uint256(1) << bitIndex)
+            );
+    }
+
     function _manhattan(
         Position memory a,
         Position memory b
@@ -129,6 +186,13 @@ library AIBehavior {
         uint8 bestHp = type(uint8).max;
         bool bestIsZero = false;
         bool bestOnTile = false;
+        // Every OTHER enemy ship blocks LOS to a given candidate — computed
+        // once (O(fleet size)), then per-candidate a single bit is cleared
+        // to exclude that candidate's own tile (see hasMapsAvoidingShips for
+        // why the shot's own target can never count as blocking itself).
+        uint256 enemyBitmap = needsLineOfSight
+            ? _shipOccupiedBitmap(ctx, true, 0)
+            : 0;
         for (uint i = 0; i < ctx.g.shipPositions.length; i++) {
             ShipPosition memory sp = ctx.g.shipPositions[i];
             if (sp.shipId == ctx.shipId || sp.status != 0 || !sp.isCreator)
@@ -138,13 +202,7 @@ library AIBehavior {
             if (
                 needsLineOfSight &&
                 dist > 1 &&
-                !ctx.maps.hasMaps(
-                    ctx.gameId,
-                    fromPos.row,
-                    fromPos.col,
-                    sp.position.row,
-                    sp.position.col
-                )
+                !_hasLosExcludingTarget(ctx, fromPos, sp.position, enemyBitmap)
             ) continue;
 
             // sp.status == 0 already checked above, so index i is in the
@@ -291,6 +349,153 @@ library AIBehavior {
         return false;
     }
 
+    // True if `dest` is actually reachable from ctx.pos this turn: not
+    // occupied by any other ship (ally or enemy — landing is never allowed
+    // on either), and the straight-line path doesn't cross an enemy ship
+    // (AI is always joiner, so enemies are isCreator — see
+    // _shipOccupiedBitmap). Centralizes "is this destination legal" so every
+    // stepping helper below shares one rule instead of only checking
+    // destination-occupancy, which is all that was needed before enemy
+    // ships could also block a path partway through (2026-09-26) — found via
+    // a real scenario breaking: a repair approach whose only path ran
+    // straight through an enemy ship it wasn't targeting.
+    // `enemyBitmap` is precomputed and passed in rather than built here —
+    // callers that check several candidates (the backoff/detour loops
+    // below) would otherwise rebuild the same O(fleet size) bitmap on every
+    // single candidate.
+    function _isReachable(
+        Ctx memory ctx,
+        Position memory dest,
+        uint256 enemyBitmap
+    ) private view returns (bool) {
+        if (dest.row == ctx.pos.row && dest.col == ctx.pos.col) return true;
+        if (_isOccupiedByOther(ctx, dest)) return false;
+        return
+            ctx.maps.hasMovementPathAvoidingShips(
+                ctx.gameId,
+                ctx.pos.row,
+                ctx.pos.col,
+                dest.row,
+                dest.col,
+                enemyBitmap
+            );
+    }
+
+    // Tries the direct line toward `target` at successively shorter
+    // distances, returning the first reachable point — or `ctx.pos`
+    // (moved == false) if every distance along that exact line is blocked.
+    function _backoffToward(
+        Ctx memory ctx,
+        Position memory target,
+        uint8 maxSteps,
+        uint256 enemyBitmap
+    ) private view returns (Position memory dest, bool moved) {
+        uint8 steps = maxSteps;
+        while (steps > 0) {
+            dest = _stepToward(ctx.pos, target, steps);
+            if (_isReachable(ctx, dest, enemyBitmap)) return (dest, true);
+            steps--;
+        }
+        return (ctx.pos, false);
+    }
+
+    // Like _stepToward, but guarantees the result is actually reachable
+    // this turn instead of just geometrically closer. First tries the
+    // direct line toward `target` at successively shorter distances (the
+    // backoff above); if an obstruction sits exactly on that whole line —
+    // the common case this was built for: an enemy ship positioned directly
+    // between this ship and where it wants to go — tries a small
+    // perpendicular detour off the same target before giving up and staying
+    // put. Not full pathfinding (this game has none, see Maps.sol's
+    // hasMovementPath comment on why): a cheap, bounded "try going around,"
+    // not a search. Found via a real scenario breaking: a repair approach
+    // whose only direct line ran straight through the enemy it wasn't
+    // targeting, and every shorter distance on that same line was equally
+    // blocked (2026-09-26).
+    //
+    // `stopShortBy` is 0 for "land on/adjacent to it" (_moveToward), 1 for
+    // "stop adjacent" (advanceToward), or a weapon/heal range for "get
+    // within range" callers (_withinRangeOf, standoffPosition).
+    function _stepTowardReachable(
+        Ctx memory ctx,
+        Position memory target,
+        uint8 maxSteps,
+        uint8 stopShortBy
+    ) private view returns (Position memory dest) {
+        uint256 enemyBitmap = _shipOccupiedBitmap(ctx, true, 0);
+        bool moved;
+        (dest, moved) = _primaryAttempt(
+            ctx,
+            target,
+            maxSteps,
+            stopShortBy,
+            enemyBitmap
+        );
+        if (moved) return dest;
+
+        // Direct line fully blocked its whole useful length — offset the
+        // approach by one tile on each axis and retry. Four fixed offsets,
+        // not a search: unrolled (not a loop over an offset array) and each
+        // attempt its own call, purely to relieve legacy-codegen stack
+        // pressure — this function was already tight.
+        (dest, moved) = _tryDetour(ctx, target, 1, 0, maxSteps, stopShortBy, enemyBitmap);
+        if (moved) return dest;
+        (dest, moved) = _tryDetour(ctx, target, -1, 0, maxSteps, stopShortBy, enemyBitmap);
+        if (moved) return dest;
+        (dest, moved) = _tryDetour(ctx, target, 0, 1, maxSteps, stopShortBy, enemyBitmap);
+        if (moved) return dest;
+        (dest, moved) = _tryDetour(ctx, target, 0, -1, maxSteps, stopShortBy, enemyBitmap);
+        if (moved) return dest;
+        return ctx.pos;
+    }
+
+    // The un-detoured attempt: dist<=stopShortBy counts as "already there"
+    // (moved=true, dest=ctx.pos — the caller shouldn't try a detour when
+    // nothing was needed in the first place), otherwise the direct-line
+    // backoff. Split out purely to relieve _stepTowardReachable's own stack
+    // pressure (same reasoning as _tryDetour below).
+    function _primaryAttempt(
+        Ctx memory ctx,
+        Position memory target,
+        uint8 maxSteps,
+        uint8 stopShortBy,
+        uint256 enemyBitmap
+    ) private view returns (Position memory, bool) {
+        uint16 dist = _manhattan(ctx.pos, target);
+        if (dist <= stopShortBy) return (ctx.pos, true);
+        uint8 steps = _min8(dist - stopShortBy, maxSteps);
+        return _backoffToward(ctx, target, steps, enemyBitmap);
+    }
+
+    // One perpendicular-offset attempt for _stepTowardReachable's detour
+    // loop — see that function's own comment for why this exists.
+    function _tryDetour(
+        Ctx memory ctx,
+        Position memory target,
+        int16 rowOffset,
+        int16 colOffset,
+        uint8 maxSteps,
+        uint8 stopShortBy,
+        uint256 enemyBitmap
+    ) private view returns (Position memory, bool) {
+        int16 detourRow = target.row + rowOffset;
+        int16 detourCol = target.col + colOffset;
+        if (
+            detourRow < 0 ||
+            detourRow >= ctx.gridHeight ||
+            detourCol < 0 ||
+            detourCol >= ctx.gridWidth
+        ) return (ctx.pos, false);
+        Position memory detourTarget = Position({
+            row: detourRow,
+            col: detourCol
+        });
+        uint16 detourDist = _manhattan(ctx.pos, detourTarget);
+        if (detourDist <= stopShortBy) return (ctx.pos, false);
+        uint8 detourSteps = _min8(detourDist - stopShortBy, maxSteps);
+        return _backoffToward(ctx, detourTarget, detourSteps, enemyBitmap);
+    }
+
     // Picks a scoring-tile movement target. Preference order:
     //   1. Unclaimed (unoccupied) tile on this ship's weapon-range-
     //      appropriate side of the grid — long-range weapons (Sniper,
@@ -397,6 +602,13 @@ library AIBehavior {
         Ctx memory ctx,
         Position memory tilePos
     ) private view returns (bool) {
+        // Role-reversed from _bestEnemyWithin: `sp` (creator) is the
+        // hypothetical shooter here, so what blocks ITS shot is the
+        // opposing (joiner) side — the AI's own fleet, from this function's
+        // caller's point of view. Computed once, reused for every creator
+        // candidate below (tilePos and the blocking side don't change
+        // per-candidate).
+        uint256 joinerBitmap = _shipOccupiedBitmap(ctx, false, 0);
         for (uint i = 0; i < ctx.g.shipPositions.length; i++) {
             ShipPosition memory sp = ctx.g.shipPositions[i];
             if (sp.status != 0 || !sp.isCreator) continue;
@@ -406,13 +618,7 @@ library AIBehavior {
             if (dist > attrs.range) continue;
             if (
                 dist > 1 &&
-                !ctx.maps.hasMaps(
-                    ctx.gameId,
-                    sp.position.row,
-                    sp.position.col,
-                    tilePos.row,
-                    tilePos.col
-                )
+                !_hasLosExcludingTarget(ctx, sp.position, tilePos, joinerBitmap)
             ) continue;
             return true;
         }
@@ -447,7 +653,7 @@ library AIBehavior {
 
         Position memory towardEnemy = ctx.pos;
         if (enemyFound) {
-            towardEnemy = _stepToward(ctx.pos, enemyPos, ctx.attrs.movement);
+            towardEnemy = _stepTowardReachable(ctx, enemyPos, ctx.attrs.movement, 0);
             (uint target, bool found) = _bestEnemyInRange(
                 ctx,
                 towardEnemy,
@@ -464,10 +670,11 @@ library AIBehavior {
 
         (Position memory tilePos, bool tileFound) = _bestScoringTile(ctx);
         if (tileFound) {
-            Position memory towardTile = _stepToward(
-                ctx.pos,
+            Position memory towardTile = _stepTowardReachable(
+                ctx,
                 tilePos,
-                ctx.attrs.movement
+                ctx.attrs.movement,
+                0
             );
             d.destRow = towardTile.row;
             d.destCol = towardTile.col;
@@ -699,6 +906,19 @@ library AIBehavior {
         return _stepToward(from, to, budget);
     }
 
+    // Public wrapper for _stepTowardReachable — see that function's own
+    // comment. Unlike stepToward above, this guarantees the result is an
+    // actually-legal moveShip destination (not blocked by an enemy ship or
+    // occupied by anyone), backing off and detouring as needed.
+    function stepTowardReachable(
+        Ctx memory ctx,
+        Position memory target,
+        uint8 maxSteps,
+        uint8 stopShortBy
+    ) internal view returns (Position memory) {
+        return _stepTowardReachable(ctx, target, maxSteps, stopShortBy);
+    }
+
     function _min8(uint16 a, uint8 b) private pure returns (uint8) {
         return a < b ? uint8(a) : b;
     }
@@ -710,16 +930,8 @@ library AIBehavior {
         Ctx memory ctx,
         Position memory target,
         uint8 maxSteps
-    ) internal pure returns (Position memory dest) {
-        uint16 dist = _manhattan(ctx.pos, target);
-        if (dist <= 1) return ctx.pos;
-        uint8 steps = _min8(dist - 1, maxSteps);
-        while (steps > 0) {
-            dest = _stepToward(ctx.pos, target, steps);
-            if (!_isOccupiedByOther(ctx, dest)) return dest;
-            steps--;
-        }
-        return ctx.pos;
+    ) internal view returns (Position memory) {
+        return _stepTowardReachable(ctx, target, maxSteps, 1);
     }
 
     // Where to stand to shoot the nearest enemy from as far away as this
@@ -731,23 +943,18 @@ library AIBehavior {
         Ctx memory ctx,
         Position memory enemyPos,
         bool allowRetreat
-    ) internal pure returns (Position memory stand) {
+    ) internal view returns (Position memory stand) {
         uint16 d = _manhattan(ctx.pos, enemyPos);
         uint8 range = ctx.attrs.range;
         if (d > range) {
-            stand = _stepToward(
-                ctx.pos,
-                enemyPos,
-                _min8(d - range, ctx.attrs.movement)
-            );
-        } else if (allowRetreat) {
-            uint8 budget = _min8(range - d, ctx.attrs.movement);
-            if (budget == 0) return ctx.pos;
-            stand = _retreatStep(ctx, enemyPos, budget);
-        } else {
-            return ctx.pos;
+            return _stepTowardReachable(ctx, enemyPos, ctx.attrs.movement, range);
         }
-        if (_isOccupiedByOther(ctx, stand)) return ctx.pos;
+        if (!allowRetreat) return ctx.pos;
+        uint8 budget = _min8(range - d, ctx.attrs.movement);
+        if (budget == 0) return ctx.pos;
+        stand = _retreatStep(ctx, enemyPos, budget);
+        if (!_isReachable(ctx, stand, _shipOccupiedBitmap(ctx, true, 0)))
+            return ctx.pos;
     }
 
     // Spend up to `budget` steps moving directly away from `threat` (every step
@@ -869,7 +1076,7 @@ library AIBehavior {
         Ctx memory ctx,
         uint8 range,
         ActionType healAction
-    ) internal pure returns (Decision memory d, bool healed) {
+    ) internal view returns (Decision memory d, bool healed) {
         (uint allyId, Position memory allyPos, bool found) = _reachableAlly(
             ctx,
             range
@@ -902,10 +1109,8 @@ library AIBehavior {
         Ctx memory ctx,
         Position memory target,
         uint8 range
-    ) private pure returns (Position memory) {
-        uint16 dist = _manhattan(ctx.pos, target);
-        if (dist <= range) return ctx.pos;
-        return _stepToward(ctx.pos, target, _min8(dist - range, ctx.attrs.movement));
+    ) private view returns (Position memory) {
+        return _stepTowardReachable(ctx, target, ctx.attrs.movement, range);
     }
 
     // The Support archetype's tree once its variant-specific healing step
@@ -948,10 +1153,11 @@ library AIBehavior {
             if (!destFound) return d;
         }
 
-        Position memory newPos = _stepToward(
-            ctx.pos,
+        Position memory newPos = _stepTowardReachable(
+            ctx,
             dest,
-            ctx.attrs.movement
+            ctx.attrs.movement,
+            0
         );
         d.destRow = newPos.row;
         d.destCol = newPos.col;
@@ -995,10 +1201,11 @@ library AIBehavior {
             return d;
         }
 
-        Position memory newPos = _stepToward(
-            ctx.pos,
+        Position memory newPos = _stepTowardReachable(
+            ctx,
             tilePos,
-            ctx.attrs.movement
+            ctx.attrs.movement,
+            0
         );
         d.destRow = newPos.row;
         d.destCol = newPos.col;
@@ -1025,7 +1232,14 @@ library AIBehavior {
         Ctx memory ctx,
         Position memory target,
         uint8 range
-    ) private pure returns (Stand memory s) {
+    ) private view returns (Stand memory s) {
+        // This already enumerates every candidate tile within `range` of
+        // `target` (not just points along one line toward it), so unlike
+        // the greedy _stepToward-based helpers, checking reachability here
+        // naturally finds a genuinely different approach angle when the
+        // straight line happens to be blocked — no separate detour logic
+        // needed (2026-09-26).
+        uint256 enemyBitmap = _shipOccupiedBitmap(ctx, true, 0);
         int16 r = int16(uint16(range));
         for (int16 dr = -r; dr <= r; dr++) {
             int16 rem = r - (dr < 0 ? -dr : dr);
@@ -1033,6 +1247,7 @@ library AIBehavior {
                 _offerStand(
                     ctx,
                     s,
+                    enemyBitmap,
                     Position({row: target.row + dr, col: target.col + dc})
                 );
             }
@@ -1042,8 +1257,9 @@ library AIBehavior {
     function _offerStand(
         Ctx memory ctx,
         Stand memory s,
+        uint256 enemyBitmap,
         Position memory t
-    ) private pure {
+    ) private view {
         if (
             t.row < 0 ||
             t.col < 0 ||
@@ -1052,7 +1268,7 @@ library AIBehavior {
         ) return;
         uint16 dist = _manhattan(ctx.pos, t);
         if (dist > ctx.attrs.movement) return;
-        if (dist != 0 && _isOccupiedByOther(ctx, t)) return;
+        if (!_isReachable(ctx, t, enemyBitmap)) return;
         bool scoring = _isScoringTile(ctx.scoringPositions, t);
         if (
             !s.found ||
@@ -1074,7 +1290,7 @@ library AIBehavior {
     function ramOnScoringTile(
         Ctx memory ctx,
         uint8 ramRange
-    ) internal pure returns (Decision memory d, bool found) {
+    ) internal view returns (Decision memory d, bool found) {
         uint16 bestDist = type(uint16).max;
         for (uint i = 0; i < ctx.g.shipPositions.length; i++) {
             ShipPosition memory sp = ctx.g.shipPositions[i];
@@ -1110,7 +1326,7 @@ library AIBehavior {
         Position memory from,
         uint8 range,
         HealFilter memory f
-    ) private pure returns (uint id, Position memory stand, bool found) {
+    ) private view returns (uint id, Position memory stand, bool found) {
         uint8 bestHp;
         bool bestDisabled;
         for (uint i = 0; i < ctx.g.shipPositions.length; i++) {
@@ -1146,7 +1362,7 @@ library AIBehavior {
         Position memory from,
         uint8 range,
         HealFilter memory f
-    ) private pure returns (bool ok, Position memory at) {
+    ) private view returns (bool ok, Position memory at) {
         ShipPosition memory sp = ctx.g.shipPositions[i];
         if (sp.status != 0 || sp.isCreator) return (false, at); // own side only
         bool isSelf = sp.shipId == ctx.shipId;
@@ -1172,7 +1388,7 @@ library AIBehavior {
         uint8 range,
         ActionType healAction,
         HealFilter memory f
-    ) private pure returns (Decision memory d, bool healed) {
+    ) private view returns (Decision memory d, bool healed) {
         (uint id, Position memory stand, bool found) = _planHeal(
             ctx,
             from,
@@ -1190,7 +1406,7 @@ library AIBehavior {
         Ctx memory ctx,
         uint8 range,
         ActionType healAction
-    ) internal pure returns (Decision memory, bool) {
+    ) internal view returns (Decision memory, bool) {
         return
             _healDecision(
                 ctx,
@@ -1209,7 +1425,7 @@ library AIBehavior {
         Position memory from,
         uint8 range,
         ActionType healAction
-    ) internal pure returns (Decision memory, bool) {
+    ) internal view returns (Decision memory, bool) {
         return
             _healDecision(
                 ctx,
@@ -1226,7 +1442,7 @@ library AIBehavior {
         Ctx memory ctx,
         uint8 range,
         ActionType healAction
-    ) internal pure returns (Decision memory, bool) {
+    ) internal view returns (Decision memory, bool) {
         return
             _healDecision(
                 ctx,
@@ -1244,7 +1460,7 @@ library AIBehavior {
         Position memory from,
         uint8 range,
         ActionType healAction
-    ) internal pure returns (Decision memory, bool) {
+    ) internal view returns (Decision memory, bool) {
         return
             _healDecision(
                 ctx,
@@ -1260,14 +1476,8 @@ library AIBehavior {
     function _moveToward(
         Ctx memory ctx,
         Position memory target
-    ) private pure returns (Position memory) {
-        uint8 steps = _min8(_manhattan(ctx.pos, target), ctx.attrs.movement);
-        while (steps > 0) {
-            Position memory dest = _stepToward(ctx.pos, target, steps);
-            if (!_isOccupiedByOther(ctx, dest)) return dest;
-            steps--;
-        }
-        return ctx.pos;
+    ) private view returns (Position memory) {
+        return _stepTowardReachable(ctx, target, ctx.attrs.movement, 0);
     }
 
     // The objective step: standing on a scoring tile already -> stay
@@ -1276,7 +1486,7 @@ library AIBehavior {
     // that lands); else there is nothing to claim (objective == false).
     function claimScoringTile(
         Ctx memory ctx
-    ) internal pure returns (Position memory stand, bool objective) {
+    ) internal view returns (Position memory stand, bool objective) {
         if (_isScoringTile(ctx.scoringPositions, ctx.pos)) {
             return (ctx.pos, true);
         }
